@@ -12,10 +12,13 @@ const VTL = {
   wsTimer: null,
   lastSnap: null,
   detectorSnap: null,
-  // 每路各自冻结：idx -> {snap, boxes, frameW, frameH, until}。
+  // 每路各自冻结：idx -> {src, boxes, frameW, frameH, until}。
   // 不能是单份全局状态 —— 32 路轮转时每 ~2.4s 就有一路命中，
   // 全局冻结会把**所有**画面按在同一张旧帧上，看起来就是"整个画面卡住不动"。
   frozen: new Map(),
+  // 每路一个递增序号：解整帧是异步的，同一路连着来两个事件时，
+  // 只有最后一次的定格算数（否则旧的那次会反过来覆盖新的）。
+  freezeSeq: new Map(),
 };
 const VTLDetector = {
   events: [],
@@ -89,11 +92,18 @@ function vtlBoxesOverlay(boxes, frameW, frameH) {
 
 /** 把一路的 JPEG 画进对应瓦片；冻结期内改为重贴「命中那一帧」。
  *
- *  冻结为什么是**就地快照**而不是等一张新图：后端的 grounding 事件不带
- *  整帧（`frame_b64` 为空，见 detector_base._build_grounding_event ——
- *  worker_loop 里每事件多编一次整帧要 30~100ms），而事件到达的那一刻
- *  该路的画布上本来就有画面。把当时的像素拷进离屏 canvas 即可，
- *  零额外编码、零画质损失，也不会让 canvas 尺寸在冻结期来回跳。
+ *  冻结为什么是**事件自带的那一帧**而不是「事件到达时画布上的画面」：
+ *  框是在**送检帧**上算出来的，而事件要等模型推理完才到（本机实测
+ *  grounding 单次 1.66s ≈ 41 帧 @25fps）。等事件到的时候实时流早就往前
+ *  跑了 41 帧 —— 拿那一刻的画布定格，框就落在**别的时刻**的目标上
+ *  （人已经走开了），这就是「画框偏移」。
+ *
+ *  所以后端把**算框用的那一帧**（显示尺寸 JPEG，解码线程本来就要编给
+ *  WS 推流的那张）随事件一起下发（``frame_b64``），这里直接用它定格：
+ *  框与画面严格对应，零额外编码、零画质损失。
+ *
+ *  旧事件没有 ``frame_b64`` 时回退到「就地快照当前画布」—— 那是错位的
+ *  老行为，只作兼容兜底。
  *
  *  冻结期内**仍然持续重贴**（内容不变）：浏览器渲染管线会把长期不写入的
  *  canvas 降级，冻结帧会比周围卡顿一档；反复写同一帧能把优先级提回来。
@@ -101,30 +111,70 @@ function vtlBoxesOverlay(boxes, frameW, frameH) {
 function paintVtlFrame(idx, jpgBytes) {
   const fz = VTL.frozen.get(idx);
   if (fz) {
-    if (fz.until > Date.now() && fz.snap) {
-      window.MultiGrid.paint(GRID_EL, idx, fz.snap,
+    if (fz.until > Date.now() && fz.src) {
+      window.MultiGrid.paint(GRID_EL, idx, fz.src,
                              vtlBoxesOverlay(fz.boxes, fz.frameW, fz.frameH));
       return;
     }
-    VTL.frozen.delete(idx);
+    dropVtlFreeze(idx);
   }
+  if (!jpgBytes) return;      // 没有新帧可画（事件刚到、定格还没就绪）
   window.MultiGrid.paint(GRID_EL, idx, jpgBytes);
 }
 
-function freezeVtlChannel(idx, ev) {
-  const tile = window.MultiGrid.tiles(GRID_EL).get(idx);
-  if (!tile || !tile.canvas.width) return;   // 还没出画面，冻不了
-  const snap = document.createElement("canvas");
-  snap.width = tile.canvas.width;
-  snap.height = tile.canvas.height;
-  snap.getContext("2d").drawImage(tile.canvas, 0, 0);
-  VTL.frozen.set(idx, {
-    snap,
-    boxes: ev.boxes || [],
-    frameW: ev.frame_w || 0,
-    frameH: ev.frame_h || 0,
-    until: Date.now() + 2000,
-  });
+/** 丢掉某一路的定格态；ImageBitmap 延迟释放（可能还有一帧 pending 在用）。 */
+function dropVtlFreeze(idx) {
+  const fz = VTL.frozen.get(idx);
+  if (!fz) return;
+  VTL.frozen.delete(idx);
+  if (fz.src && typeof fz.src.close === "function") {
+    // MultiGrid 的 pending 槽里可能还攥着这个 bitmap，close 得太早会让
+    // 那一帧 drawImage 抛异常（被内部 catch 掉，只是白丢一帧）。
+    setTimeout(() => { try { fz.src.close(); } catch (_) { /* ignore */ } }, 1000);
+  }
+}
+
+/** 把事件里的整帧 base64 解成可绘制对象。 */
+async function decodeVtlFrame(b64) {
+  const bin = atob(b64);
+  const len = bin.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
+  return await createImageBitmap(new Blob([bytes], { type: "image/jpeg" }));
+}
+
+/** 某一路定格：优先用事件自带的「算框用的那一帧」，没有才就地快照。
+ *  返回 true = 定格已就绪（调用方据此立刻画一次，消除视觉跳变）。 */
+async function freezeVtlChannel(idx, ev) {
+  const boxes = ev.boxes || [];
+  const frameW = ev.frame_w || 0;
+  const frameH = ev.frame_h || 0;
+  const until = Date.now() + 2000;
+  // 序号**先领**：同一路连着来两个事件时，解整帧是异步的，谁先解完谁
+  // 先落地 —— 不按「事件先后」领号的话，旧事件可能反过来覆盖新的。
+  const seq = (VTL.freezeSeq.get(idx) || 0) + 1;
+  VTL.freezeSeq.set(idx, seq);
+  let src = null;
+  if (ev.frame_b64) {
+    try {
+      src = await decodeVtlFrame(ev.frame_b64);
+    } catch (e) {
+      src = null;
+    }
+  }
+  if (seq !== VTL.freezeSeq.get(idx)) return false;   // 已被更新的事件取代
+  if (!src) {
+    // 回退：就地快照当前画布（旧事件没有 frame_b64 时的兼容路径）。
+    const tile = window.MultiGrid.tiles(GRID_EL).get(idx);
+    if (!tile || !tile.canvas.width) return false;   // 还没出画面，冻不了
+    const snap = document.createElement("canvas");
+    snap.width = tile.canvas.width;
+    snap.height = tile.canvas.height;
+    snap.getContext("2d").drawImage(tile.canvas, 0, 0);
+    src = snap;
+  }
+  VTL.frozen.set(idx, { src, boxes, frameW, frameH, until });
+  return true;
 }
 
 function updateVtlTiles(session) {
@@ -133,9 +183,9 @@ function updateVtlTiles(session) {
   const vlm = session.vlm || {};
   const { total, ok, eof } = window.MultiGrid.status(
     GRID_EL, list, window.MultiCard.activeChannels(vlm));
-  // 通道数缩小时清掉多出来的冻结态，否则残留的 base64 会一直占着内存。
+  // 通道数缩小时清掉多出来的冻结态，否则残留的整帧会一直占着内存。
   for (const idx of Array.from(VTL.frozen.keys())) {
-    if (idx >= total) VTL.frozen.delete(idx);
+    if (idx >= total) dropVtlFreeze(idx);
   }
   const hint = document.getElementById("vtl-channel-hint");
   if (hint) {
@@ -188,9 +238,11 @@ function connectVtlWs() {
         // 冻结态会把所有画面按在同一张旧帧上，看起来就是"整个画面卡住"。
         if (snap.boxes && snap.boxes.length) {
           const ch = typeof snap.channel === "number" ? snap.channel : 0;
-          freezeVtlChannel(ch, snap);
-          // 事件到达瞬间画一次（消除视觉跳变），后续由 paintVtlFrame 接力。
-          paintVtlFrame(ch, null);
+          // 定格要解整帧（异步），解完立刻画一次，消除视觉跳变；
+          // 后续由 paintVtlFrame 接力（每来一帧重贴一次同一张）。
+          freezeVtlChannel(ch, snap).then((ok) => {
+            if (ok) paintVtlFrame(ch, null);
+          });
         }
         return;
       } else if (snap.type === "status") {
@@ -297,8 +349,13 @@ function refreshVtlButtons(state) {
   }
 }
 
-/** 把整帧画到 overlay canvas 上，再叠 bbox —— 历史缩略图与大图弹窗共用。 */
-async function vtlRenderHistoryItem(canvas, frameImg, boxes, palette) {
+/** 把整帧画到 overlay canvas 上，再叠 bbox —— 历史缩略图与大图弹窗共用。
+ *
+ *  ``frameW``/``frameH`` 是**框所在的空间**（送检帧尺寸，来自事件的
+ *  ``frame_w``/``frame_h``）。整帧图可能是显示尺寸（多路宫格的 960 宽），
+ *  两者不一定同尺寸 —— 必须按「图尺寸 / 框空间尺寸」换算，否则框会缩在
+ *  左上角。旧事件里整帧图与框空间同尺寸时换算系数就是 1，行为不变。 */
+async function vtlRenderHistoryItem(canvas, frameImg, boxes, palette, frameW, frameH) {
   if (!canvas) return;
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
@@ -310,7 +367,9 @@ async function vtlRenderHistoryItem(canvas, frameImg, boxes, palette) {
   try {
     ctx.drawImage(frameImg, 0, 0, w, h);
   } catch (_) { /* ignore draw errors */ }
-  drawVtlBoxes(canvas, boxes || [], palette || vtlPaletteRGB);
+  const sx = frameW ? w / frameW : 1;
+  const sy = frameH ? h / frameH : 1;
+  drawVtlBoxes(canvas, boxes || [], palette || vtlPaletteRGB, sx, sy);
 }
 
 /** 逐框画矩形 + 顶部标签。
@@ -412,7 +471,8 @@ function buildVtlEventLi(ev, isLatest) {
     li.appendChild(wrap);
 
     img.addEventListener("load", () => {
-      vtlRenderHistoryItem(overlay, img, boxes, VTLDetector.palette);
+      vtlRenderHistoryItem(overlay, img, boxes, VTLDetector.palette,
+                            ev.frame_w, ev.frame_h);
     });
     wrap.addEventListener("dblclick", () => vtlOpenFrameModal(ev));
   }
@@ -532,7 +592,8 @@ function vtlOpenFrameModal(ev) {
         overlay.className = "vfa-frame-modal-img-overlay";
         wrap.appendChild(overlay);
       }
-      vtlRenderHistoryItem(overlay, imgEl, boxes, VTLDetector.palette);
+      vtlRenderHistoryItem(overlay, imgEl, boxes, VTLDetector.palette,
+                            ev.frame_w, ev.frame_h);
     };
   }
 
