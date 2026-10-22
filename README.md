@@ -20,6 +20,23 @@ wdnwebui 的**视频分析类应用插件包**。装上之后，宿主页面上�
 
 ## 安装
 
+宿主仓库根有一条 `update_rkwhl.sh`，它同时驱动四个 SDK 和两个卡片插件包。
+**首选跑它**，别手动 pip：
+
+```bash
+cd <wdnwebui>
+./update_rkwhl.sh                       # 按 git HEAD 决定哪些要重装
+UPDATE_RKWHL_FORCE_REBUILD=1 ./update_rkwhl.sh   # 强制全部重装
+```
+
+脚本对本包做的事：HEAD 没变就完全不碰 `.venv`（连 pip 都不跑）；HEAD 变了
+才 `purge_install_traces` + `pip install -e`。装完会跑一遍卡片注册校验
+（`scripts/check_plugin_entrypoints.py`），逐张卡确认「entry point 能解析 →
+manifest `"id"` 与 entry point 名逐字相同 → 卡片目录有 `static/`」。这挡的
+是那个静默失败：pip 全程报成功，宿主启动却把这几张卡 FATAL 跳过。
+
+手工装也可以（首次 clone 时脚本走的就是这条路）：
+
 ```bash
 # 落在 wdnwebui 的 venv 里，与 wdnai/wdnav/wdndds 平级
 cd <wdnwebui>/.venv/src
