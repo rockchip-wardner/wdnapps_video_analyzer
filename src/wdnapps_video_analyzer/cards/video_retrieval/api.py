@@ -95,7 +95,7 @@ async def open_source(payload: dict) -> dict:
     """向导模式预览:打开视频源(复用 vd 单例 VideoSession)。
 
     与 vd 的 ``/open`` 行为一致 —— ``get_session()`` 拿到的是 vd
-    / vtd / vtl / vcs 四页共享的同一个 ``VideoSession`` 单例;vcs
+    / vtd / vtl / vr 四页共享的同一个 ``VideoSession`` 单例;vr
     仅消费 WS 帧流、不注册 frame sink,不会与 vd 的 detector 抢帧。
     视频源路径可以是本地文件 / RTSP / RTMP / HLS / 摄像头,统一
     走 :func:`VideoSession.open` 路由。
@@ -261,7 +261,7 @@ async def delete_cache_entry(payload: dict) -> dict:
     c = get_video_cache()
     deleted = c.delete_video(md5, chunk_seconds, chunk_overlap_seconds) \
         if c is not None else 0
-    LOG.info("vcs API: DELETE /cache/entry md5=%s chunk=%s → %d rows",
+    LOG.info("vr API: DELETE /cache/entry md5=%s chunk=%s → %d rows",
              md5[:12], chunk_seconds, deleted)
     return {"ok": True, "rows_deleted": deleted}
 
@@ -364,7 +364,7 @@ async def query_multi(payload: dict) -> dict:
                               or getattr(session, "_model_id", "") or "",
                               e["chunk_seconds"], e["chunk_overlap_seconds"])
         except Exception as exc:  # noqa: BLE001
-            LOG.warning("vcs query_multi: lookup %s failed: %s",
+            LOG.warning("vr query_multi: lookup %s failed: %s",
                         e["md5"][:12], exc)
         if cached is None:
             groups.append({
@@ -418,7 +418,7 @@ async def query_multi(payload: dict) -> dict:
             h["above_threshold"] = False
             g["hits"].append(h)
             g["fallback_used"] = True
-        LOG.info("vcs query_multi: global lenient fallback — %d strict "
+        LOG.info("vr query_multi: global lenient fallback — %d strict "
                  "hits total=%d candidates, kept=%d",
                  total_above, len(cands), min(len(cands), min_results))
     return {"ok": True, "text": text, "sim_threshold": sim_threshold,
@@ -438,7 +438,7 @@ async def clear_cache() -> dict:
     c = get_video_cache()
     cleared = c.clear() if c is not None else 0
     get_service().reset_session()
-    LOG.info("vcs API: POST /cache/clear → %d entries (session reset)", cleared)
+    LOG.info("vr API: POST /cache/clear → %d entries (session reset)", cleared)
     return {"ok": True, "videos_cleared": cleared}
 
 
@@ -460,7 +460,7 @@ async def start_extract(payload: dict) -> dict:
     即使传入也会被忽略（改参数请改 ``app/core/video/search.py`` 的
     ``FIXED_CHUNK_SECONDS`` / ``FIXED_CHUNK_OVERLAP_SECONDS``）。
     """
-    LOG.info("vcs API: POST /extract payload=%s", payload)
+    LOG.info("vr API: POST /extract payload=%s", payload)
     try:
         return get_service().start_extract()
     except ValueError as e:
@@ -523,7 +523,7 @@ async def query_video(payload: dict) -> dict:
 
 
 @router.websocket("/ws")
-async def vcs_ws(ws: WebSocket) -> None:
+async def vr_ws(ws: WebSocket) -> None:
     """单向上行（server → client）。
 
     协议：
@@ -563,7 +563,7 @@ async def vcs_ws(ws: WebSocket) -> None:
 
 
 @router.websocket("/play")
-async def vcs_play_ws(ws: WebSocket) -> None:
+async def vr_play_ws(ws: WebSocket) -> None:
     """播放命中片段：服务端按源 fps 顺序推 JPEG 帧。
 
     协议（双向）：

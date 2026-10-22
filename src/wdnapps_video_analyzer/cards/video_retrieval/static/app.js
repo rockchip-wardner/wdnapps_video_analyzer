@@ -1044,9 +1044,12 @@ function vrSyncCanvasSize() {
 function vrDrawJpeg(jpgBytes) {
   const canvas = vrEl("vr-canvas");
   if (!canvas) return;
-  // 窗口 resize 后显示尺寸漂移则重新同步
-  if (Math.abs(canvas.clientWidth - canvas.width) > 1 ||
-      Math.abs(canvas.clientHeight - canvas.height) > 1) {
+  // 容器尺寸漂移（窗口 resize / 向导搬回画布）时重新同步像素尺寸。
+  // 判据用 parentElement 而不是 canvas.clientWidth：后者在 CSS 按属性
+  // 尺寸渲染时会恒等于 canvas.width，永远检测不到容器变大。
+  const parent = canvas.parentElement;
+  if (parent && (Math.abs(parent.clientWidth - canvas.width) > 1 ||
+                 Math.abs(parent.clientHeight - canvas.height) > 1)) {
     vrSyncCanvasSize();
   }
   const blob = new Blob([jpgBytes], { type: "image/jpeg" });
