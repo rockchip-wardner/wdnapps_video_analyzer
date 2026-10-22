@@ -7,7 +7,7 @@
   "preview_video": "/static/apps/video-target-localization/preview.mp4",
   "preview_image": "",
   "software_capabilities": [
-    "swcap_grounding"
+    "swcap_vision_grounding"
   ],
   "hardware_capabilities": [
     "hwcap_video_input"

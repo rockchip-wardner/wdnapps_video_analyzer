@@ -406,7 +406,7 @@ async function refreshVdDetector() {
   // ...
     const modelEl = document.getElementById("vd-model-pick");
     if (modelEl && modelEl.disabled) {
-      loadModelPick("vd-model-pick", "swcap_video_describe", "vd.model_id");
+      loadModelPick("vd-model-pick", "swcap_vision_chat", "vd.model_id");
     }
     return data;
   } catch (_) { return null; }
@@ -597,8 +597,8 @@ function initVideoDetection() {
   window.__vdInit = true;
 
   // ...
-  loadModelPick("vd-model-pick", "swcap_video_describe", "vd.model_id");
-  loadModelPick("vd-audio-model-pick", "swcap_audio_understand", "vd.audio.model_id");
+  loadModelPick("vd-model-pick", "swcap_vision_chat", "vd.model_id");
+  loadModelPick("vd-audio-model-pick", "swcap_audio_chat", "vd.audio.model_id");
 
   // 帧判据浮层（角标 + 曲线）锚在**画面容器**上，多路宫格里没有单一 canvas。
   // **apiBase 指向本卡**：判据挂在 MultiChannelSession 上，不是

@@ -37,7 +37,7 @@ class StartPayload(BaseModel):
     prompt: str = Field(..., min_length=1, description="音频理解提示词")
     model_id: str | None = Field(
         default=None,
-        description=("可选,从下拉框选的 swcap_audio_understand 实例 id;"
+        description=("可选,从下拉框选的 swcap_audio_chat 实例 id;"
                      " 不传/空 = auto-pick (本机优先,旧行为)"),
     )
 

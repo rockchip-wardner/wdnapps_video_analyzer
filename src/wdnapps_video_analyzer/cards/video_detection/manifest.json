@@ -7,8 +7,8 @@
   "preview_video": "/static/apps/video-detection/preview.mp4",
   "preview_image": "",
   "software_capabilities": [
-    "swcap_video_describe",
-    "swcap_audio_understand"
+    "swcap_vision_chat",
+    "swcap_audio_chat"
   ],
   "hardware_capabilities": [
     "hwcap_video_input",

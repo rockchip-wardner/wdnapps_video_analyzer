@@ -7,7 +7,7 @@
   "preview_video": "/static/apps/video-target-detection/preview.mp4",
   "preview_image": "",
   "software_capabilities": [
-    "swcap_video_describe"
+    "swcap_vision_chat"
   ],
   "hardware_capabilities": [
     "hwcap_video_input"

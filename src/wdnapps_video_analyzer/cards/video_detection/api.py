@@ -138,7 +138,7 @@ router = build_multi_router(
 @router.get("/available-vision-sizes")
 async def available_vision_sizes() -> dict:
     """List the vision-model native sizes currently loaded into the
-    running ``swcap_video_describe`` compute instance (qwen3-vl-4b /
+    running ``swcap_vision_chat`` compute instance (qwen3-vl-4b /
     qwen3.5-vl-4b / future VLM presets — anything advertising that
     capability whose backend exposes ``available_image_sizes``).
 
@@ -159,10 +159,10 @@ async def available_vision_sizes() -> dict:
     sizes: list[int] = []
     for inst in registry.list_with_source():
         # Filter by capability instead of model_id so any future VLM
-        # preset exposing ``swcap_video_describe`` (e.g.
+        # preset exposing ``swcap_vision_chat`` (e.g.
         # qwen3.5-vl-4b) is picked up automatically.
         caps = inst.get("capability_types") or []
-        if "swcap_video_describe" not in caps:
+        if "swcap_vision_chat" not in caps:
             continue
         raw = inst.get("available_image_sizes") or []
         if not isinstance(raw, list):

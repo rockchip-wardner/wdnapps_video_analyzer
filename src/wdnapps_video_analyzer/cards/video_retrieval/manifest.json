@@ -7,7 +7,7 @@
   "preview_video": "/static/apps/video-retrieval/preview.mp4",
   "preview_image": "",
   "software_capabilities": [
-    "swcap_video_retrieval"
+    "swcap_vision_embedding"
   ],
   "hardware_capabilities": [
     "hwcap_video_input"

@@ -198,9 +198,9 @@ function bindTaCounter(inputEl, countEl) {
 
 // 「功能配置」勾选前提：对应 capability 已在「算力配置」启用（running）。
 // 数据源 /api/compute/instances-by-capability（与后端 get_session 同语义，
-// qwen3.5-vl-4b 也能满足 swcap_video_describe）。
+// qwen3.5-vl-4b 也能满足 swcap_vision_chat）。
 const VR_MODE_CAP = {
-  search: "swcap_video_retrieval",
+  search: "swcap_vision_embedding",
 };
 const VR_MODE_LABEL = {
   search: "[VLEmb]视觉信息编码v3",

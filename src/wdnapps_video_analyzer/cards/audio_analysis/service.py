@@ -88,7 +88,7 @@ class AudioAnalysisService:
         self._error: str = ""
         self._sources: List[str] = []
         self._prompt: str = ""
-        # 用户从下拉框选中的 swcap_audio_understand 实例 model_id;
+        # 用户从下拉框选中的 swcap_audio_chat 实例 model_id;
         # 空串 = auto-pick (与旧行为一致)。
         self._chosen_model_id: str = ""
         self._closed = False
@@ -144,7 +144,7 @@ class AudioAnalysisService:
         """
         try:
             return bool(get_registry().list_sessions(
-                "swcap_audio_understand", include_remote=True))
+                "swcap_audio_chat", include_remote=True))
         except Exception:  # noqa: BLE001
             return False
 
@@ -242,7 +242,7 @@ class AudioAnalysisService:
         失败 → ValueError / FileNotFoundError / RuntimeError 由 API 层映射到
         400 / 404 / 502。
 
-        ``model_id``：前端下拉框选中的 ``swcap_audio_understand`` 实例 id。
+        ``model_id``：前端下拉框选中的 ``swcap_audio_chat`` 实例 id。
         ``None`` 或 ``""`` = 走 ``get_session`` 的本机优先 auto-pick。
         """
         srcs = ([source] if isinstance(source, str)
@@ -263,9 +263,9 @@ class AudioAnalysisService:
         # 预检 capability —— 不等 worker 探测才报错
         if model_id:
             get_registry().get_session_for_model(
-                "swcap_audio_understand", model_id.strip())
+                "swcap_audio_chat", model_id.strip())
         else:
-            get_registry().get_session("swcap_audio_understand")
+            get_registry().get_session("swcap_audio_chat")
 
         # 停掉上一轮（旧的单路 worker 也一并收掉）
         self._stop_session()

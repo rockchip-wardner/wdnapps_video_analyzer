@@ -750,7 +750,7 @@ function initVideoTargetLocalization() {
   if (window.__vtlInit) return;
   window.__vtlInit = true;
 
-  loadInstancePickMulti(PICK_ID, "swcap_grounding", "vtl.instances");
+  loadInstancePickMulti(PICK_ID, "swcap_vision_grounding", "vtl.instances");
 
   const sourceEl = document.getElementById("vtl-sources");
   const loopEl   = document.getElementById("vtl-loop");
@@ -1027,7 +1027,7 @@ window.ImApp_video_target_localization.applyWizardSnapshot = async function (opt
     // 必须先重拉勾选器：页面初始化时模型还没起，列表是空的，直接点会因
     // "一个都没勾"静默中止（向导 finish 的顺序是「等模型 ready → 这里」）。
     try {
-      await window.loadInstancePickMulti?.(PICK_ID, "swcap_grounding",
+      await window.loadInstancePickMulti?.(PICK_ID, "swcap_vision_grounding",
                                             "vtl.instances");
     } catch (e) {
       throw new Error("WizardSnapshotError:detector_start_failed:" + (e?.message || e));

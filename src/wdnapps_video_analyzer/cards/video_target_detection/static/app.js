@@ -564,7 +564,7 @@ function initVideoTargetDetection() {
   // 空状态：一进页面画面区是黑的，给一句人话告诉用户下一步做什么
   setVtdOverlay(VTD_EMPTY_HINT, false);
 
-  loadInstancePickMulti(PICK_ID, "swcap_video_describe", "vtd.instances");
+  loadInstancePickMulti(PICK_ID, "swcap_vision_chat", "vtd.instances");
   // apiBase 指向本卡判据端点：/api/video/judge 操作的是单例 VideoSession
   // （vd / vtl 共用），本页走 MultiChannelSession，同 VR 挂自己的 judge_api。
   window.FrameJudge?.mount({ prefix: "vtd", canvasId: GRID_EL,
@@ -635,7 +635,7 @@ window.ImApp_video_target_detection.applyWizardSnapshot = async function (opts) 
     // 必须先重拉勾选器：页面初始化时模型还没起，列表是空的，直接点会因
     // "一个都没勾"静默中止（向导 finish 的顺序是「等模型 ready → 这里」）。
     try {
-      await window.loadInstancePickMulti?.(PICK_ID, "swcap_video_describe",
+      await window.loadInstancePickMulti?.(PICK_ID, "swcap_vision_chat",
                                            "vtd.instances");
     } catch (e) {
       throw new Error("WizardSnapshotError:detector_start_failed:" + (e?.message || e));

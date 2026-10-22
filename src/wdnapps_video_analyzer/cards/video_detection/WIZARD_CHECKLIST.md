@@ -13,7 +13,7 @@
 | 现有静态资源 | `static/app.js` (863 行) + `static/app.css` (1 行) + `static/template.html` (168 行) |
 | 主要 DOM ID | `#vd-source` / `#vd-loop` / `#vd-prompt` / `#vd-detect-size` / `#vd-audio-prompt` |
 | 启动按钮 | `#vd-open` / `#vd-detector-start` / `#vd-audio-start` |
-| 已声明 software_capabilities | `swcap_video_describe` + `swcap_audio_understand` |
+| 已声明 software_capabilities | `swcap_vision_chat` + `swcap_audio_chat` |
 | 已声明 hardware_capabilities | `hwcap_video_input` + `hwcap_audio_input` + `hwcap_audio_output` |
 | 一键开启模型 | RK182X#0 启 `qwen3.5-vl-4b`(VLLM)/ RK182X#1 启 `qwen2.5-omni-3b`(Omni) |
 
@@ -28,8 +28,8 @@
   "enabled": true,
   "wizard_title": "音视频描述快速配置",
   "swcap_to_model": {
-    "swcap_video_describe":   { "npu_index": 0, "model_id": "qwen3.5-vl-4b" },
-    "swcap_audio_understand": { "npu_index": 1, "model_id": "qwen2.5-omni-3b" }
+    "swcap_vision_chat":   { "npu_index": 0, "model_id": "qwen3.5-vl-4b" },
+    "swcap_audio_chat": { "npu_index": 1, "model_id": "qwen2.5-omni-3b" }
   },
   "open_source_button": "vd-open",
   "start_buttons": ["vd-detector-start", "vd-audio-start"],

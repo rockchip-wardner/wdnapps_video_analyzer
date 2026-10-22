@@ -8,7 +8,7 @@
   "preview_video": "",
   "preview_image": "",
   "software_capabilities": [
-    "swcap_audio_understand"
+    "swcap_audio_chat"
   ],
   "hardware_capabilities": [
     "hwcap_audio_input"

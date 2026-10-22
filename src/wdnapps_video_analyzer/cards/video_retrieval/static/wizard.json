@@ -2,7 +2,7 @@
   "enabled": true,
   "wizard_title": "监控反查快速配置",
   "swcap_to_model": {
-    "swcap_video_retrieval": {
+    "swcap_vision_embedding": {
       "npu_index": 1,
       "model_id": "qwen3-vl-embedding-2b"
     }
