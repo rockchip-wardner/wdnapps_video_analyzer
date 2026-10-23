@@ -1560,11 +1560,44 @@ initVideoRetrieval();
 //  应用向导模式 API — wizard 框架 finish 时调用
 // 契约:opts 由 wizard.json 的 steps[].fields[].ui_key 决定:
 //   vr-source → opts.source   vr-text → opts.searchText
-// source 齐全时勾选「检索」并点 #vr-start（先提取再检索）；
+// source 齐全时启动检索（先提取再检索）；
 // searchText 非空时写入检索问题框。切片参数固化为服务端常量，向导不收集。
 // 写值后统一补发 input/change —— 卡片内源框 / 勾选框的监听依赖它们。
 // 全局名约定 ImApp_<app.id 去掉 hyphen>。
 // ------------------------------------------------------------------ *
+// 向导启动前的「能力就绪」探测 —— **直接问后端**，不等 5s 周期的
+// modeAvail 那一拍。为什么不能只靠按钮：#vr-start 的 disabled 判据里有
+// `avail.search === false`（检索模型没启用）和 `!!qSearch`（检索问题为空）
+// 两项 —— 任一不满足按钮就是灰的，而 **disabled 按钮的 click() 被浏览器
+// 静默丢弃**（不报错、不打日志）：向导显示"完成配置"、检索却根本没开始
+// （2026-10-23 与 音视频描述 / 视频任意目标定位 同源的坑）。
+// 详见宿主 core/wizard-start.js 的文件头。
+async function vrCapabilitySnapshot() {
+  // vrRefreshModeAvail 查的是 instances-by-capability（活的实例表），
+  // 顺带把按钮的置灰状态刷新一遍。
+  await vrRefreshModeAvail().catch(() => {});
+  const avail = VR.modeAvail || { search: null };
+  return {
+    // 与按钮同口径：search === null（还没探测到）不算"未启用"
+    available: avail.search !== false,
+    state: (VR.snap && VR.snap.state) || "idle",
+    // 卡片自己的失败通道：错误横幅。vrStart() 的每个"没开始"分支都会写它
+    // （没源 / 模型未启用 / 检索问题为空），成功开跑时会被清空 ——
+    // 用它当"真的跑起来了吗"的判据，比看 state 稳（state 可能是上一轮的）。
+    error: (vrEl("vr-error-text")?.textContent || "").trim(),
+  };
+}
+
+// 调宿主共享的启动器（core/wizard-start.js）。宿主版本太老、没有这个模块
+// 时给一句人话错误，而不是 "Cannot read properties of undefined"。
+function _wizardStart(opts) {
+  const ws = window.WizardStart;
+  if (!ws || typeof ws.run !== "function") {
+    throw new Error("WizardSnapshotError:helper_missing:宿主缺少 /static/core/wizard-start.js,请更新 wdnwebui 后重试");
+  }
+  return ws.run(opts);
+}
+
 window.ImApp_video_retrieval = window.ImApp_video_retrieval || {};
 window.ImApp_video_retrieval.applyWizardSnapshot = async function (opts) {
   const setVal = (id, v) => {
@@ -1597,16 +1630,21 @@ window.ImApp_video_retrieval.applyWizardSnapshot = async function (opts) {
   }
   // 勾选前先主动刷新一次算力可用性。向导在 _waitForModelsRunning 之后
   // 立即回调，而前端 modeAvail 走 5s 周期，此刻可能仍是"未启用"旧值。
-  await vrRefreshModeAvail().catch(() => {});
-  const btn = document.getElementById("vr-start");
-  if (btn) {
-    try { btn.click(); }
-    catch (e) { throw new Error("WizardSnapshotError:vr_start_failed:" + (e?.message || e)); }
-    return { source_set: true,
-             search_set: hasSearch, started: true };
-  }
+  //
+  // **不能 btn.click()**：#vr-start 的 disabled 判据里还有「检索问题为空」
+  // 这一项 —— 问题空着时按钮是灰的，click() 会被浏览器**静默丢弃**，向导
+  // 显示"完成配置"、检索却没开始，且没有任何提示。改成宿主共享的
+  // WizardStart：等能力就绪 → 直接调 vrStart() → 用卡片自己的错误横幅
+  // 确认"真的跑起来了"（没跑起来要让向导报错，不静默成功）。
+  await _wizardStart({
+    label: "开始检索",
+    probe: vrCapabilitySnapshot,
+    isReady: (s) => !!(s && s.available !== false),
+    isStarted: (s) => !(s && s.error),
+    start: () => vrStart(),
+  });
   return { source_set: true,
-           search_set: hasSearch, started: false };
+           search_set: hasSearch, started: true };
 };
 
 })();

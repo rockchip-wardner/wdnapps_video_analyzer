@@ -718,9 +718,29 @@ initVideoTargetDetection();
 //   vtd-prompt       → opts.prompt
 //   vtd-detect-size  → opts.detectSize
 // source 非空 → 写回 #vtd-sources 后按行拆成多路再打开；prompt 非空 →
-// 模拟点 #vtd-detector-start。空字段不触发对应动作。
+// 启动检测。空字段不触发对应动作。
 // 全局名约定 ImApp_<app.id 去掉 hyphen>。
 // ------------------------------------------------------------------ *
+// 向导启动前的「能力就绪」探测 —— **直接问后端快照**，不等 1Hz WS 那一拍。
+// 为什么不能靠 WS：WS 快照比 registry 慢最多 1s，模型刚起来的那一秒
+// 快照还是"未就绪"，启动按钮因此是灰的，而 **disabled 按钮的 click()
+// 被浏览器静默丢弃**（不报错、不打日志）—— 向导显示"完成配置"、检测却
+// 根本没跑起来（2026-10-23 实测）。详见宿主 core/wizard-start.js 的文件头。
+async function vtdCapabilitySnapshot() {
+  const data = await refreshVtdDetector();
+  return (data && data.snapshot) || VTD.detectorSnap || null;
+}
+
+// 调宿主共享的启动器（core/wizard-start.js）。宿主版本太老、没有这个模块
+// 时给一句人话错误，而不是 "Cannot read properties of undefined"。
+function _wizardStart(opts) {
+  const ws = window.WizardStart;
+  if (!ws || typeof ws.run !== "function") {
+    throw new Error("WizardSnapshotError:helper_missing:宿主缺少 /static/core/wizard-start.js,请更新 wdnwebui 后重试");
+  }
+  return ws.run(opts);
+}
+
 window.ImApp_video_target_detection = window.ImApp_video_target_detection || {};
 window.ImApp_video_target_detection.applyWizardSnapshot = async function (opts) {
   const setVal = (id, v) => { const el = document.getElementById(id); if (el != null) el.value = v; };
@@ -747,19 +767,23 @@ window.ImApp_video_target_detection.applyWizardSnapshot = async function (opts) 
   }
 
   if (opts.prompt) {
-    // 必须先重拉勾选器：页面初始化时模型还没起，列表是空的，直接点会因
-    // "一个都没勾"静默中止（向导 finish 的顺序是「等模型 ready → 这里」）。
-    try {
-      await window.loadInstancePickMulti?.(PICK_ID, "swcap_vision_chat",
-                                           "vtd.instances");
-    } catch (e) {
-      throw new Error("WizardSnapshotError:detector_start_failed:" + (e?.message || e));
-    }
-    const btn = document.getElementById("vtd-detector-start");
-    if (btn) {
-      try { btn.click(); result.detector_started = true; }
-      catch (e) { throw new Error("WizardSnapshotError:detector_start_failed:" + (e?.message || e)); }
-    }
+    // **不能 btn.click()**：启动按钮的 disabled 由 1Hz 快照的 session_ready
+    // 决定,模型刚就绪时按钮还是灰的,而 disabled 按钮的 click() 会被浏览器
+    // **静默丢弃** —— 向导显示"完成配置"、检测却没跑起来(2026-10-23 实测)。
+    // 改成宿主共享的 WizardStart:先等能力真就绪(直接问后端),再直接调
+    // 启动函数;等不到就抛错让向导显示「重新开启模型」。
+    await _wizardStart({
+      label: "启动检测",
+      probe: vtdCapabilitySnapshot,
+      start: async () => {
+        // 必须在**就绪之后**重拉勾选器:等就绪前模型还没起,列表是空的,
+        // 直接点会因"一个都没勾"静默中止。
+        await window.loadInstancePickMulti?.(PICK_ID, "swcap_vision_chat",
+                                             "vtd.instances");
+        await vtdDetectorStart();
+      },
+    });
+    result.detector_started = true;
   }
 
   return result;

@@ -842,10 +842,38 @@ initVideoDetection();
 //   vd-audio-prompt → opts.audioPrompt
 // 空字段不触发对应启动动作;失败抛 Error("WizardSnapshotError:<code>:<detail>")
 //   * open_source_failed    → wizard 回 source 步骤
-//   * detector_start_failed → wizard 弹"启动失败"提示
-//   * audio_start_failed    → wizard 弹"启动失败"提示
+//   * capability_not_ready  → 模型没就绪 → wizard 显示错误 +「重新开启模型」
+//   * start_failed         → 启动没成功 → wizard 显示错误(去功能页看提示)
 // 全局名固定为 ImApp_<app_id 去掉 hyphen>—— wizard 按这个约定查找。
 // ------------------------------------------------------------------ *
+// 向导启动前的「能力就绪」探测 —— **直接问后端快照**，不等 1Hz WS 那一拍。
+// 为什么不能靠 WS：WS 快照比 registry 慢最多 1s，模型刚起来的那一秒
+// 快照还是"未就绪"，启动按钮因此是灰的，而 **disabled 按钮的 click()
+// 被浏览器静默丢弃**（不报错、不打日志）—— 向导显示"完成配置"、描述却
+// 根本没跑起来（2026-10-23 实测）。详见宿主 core/wizard-start.js 的文件头。
+async function vdCapabilitySnapshot() {
+  const data = await refreshVdDetector();
+  return (data && data.snapshot) || VD.detectorSnap || null;
+}
+
+// 音轨分析的「能力就绪」探测：音轨面板自己的快照（available=false = Omni
+// 没加载）。同样直接问后端，不等面板的 WS 那一拍 —— 「分析音频」按钮的
+// disabled 也来自这份快照，disabled 的 click() 一样会被静默丢弃。
+async function vdAudioCapabilitySnapshot() {
+  try { await AudioAnalysis.refresh?.(); } catch (_) { /* best-effort */ }
+  return VD.audioSnap || null;
+}
+
+// 调宿主共享的启动器（core/wizard-start.js）。宿主版本太老、没有这个模块
+// 时给一句人话错误，而不是 "Cannot read properties of undefined"。
+function _wizardStart(opts) {
+  const ws = window.WizardStart;
+  if (!ws || typeof ws.run !== "function") {
+    throw new Error("WizardSnapshotError:helper_missing:宿主缺少 /static/core/wizard-start.js,请更新 wdnwebui 后重试");
+  }
+  return ws.run(opts);
+}
+
 window.ImApp_video_detection = window.ImApp_video_detection || {};
 window.ImApp_video_detection.applyWizardSnapshot = async function (opts) {
   const setVal = (id, v) => { const el = document.getElementById(id); if (el != null) el.value = v; };
@@ -880,22 +908,35 @@ window.ImApp_video_detection.applyWizardSnapshot = async function (opts) {
     }
   }
 
-  // 3. 启动检测(仅 prompt 非空)— 模拟点击原应用页面的"启动检测"按钮
+  // 3. 启动检测(仅 prompt 非空)
   if (opts.prompt) {
-    const btn = document.getElementById("vd-detector-start");
-    if (btn) {
-      try { btn.click(); result.detector_started = true; }
-      catch (e) { throw new Error("WizardSnapshotError:detector_start_failed:" + (e?.message || e)); }
-    }
+    // **不能 btn.click()**：启动按钮的 disabled 由 1Hz 快照的 session_ready
+    // 决定,模型刚就绪时按钮还是灰的,而 disabled 按钮的 click() 会被浏览器
+    // **静默丢弃** —— 向导显示"完成配置"、描述却没跑起来(2026-10-23 实测)。
+    // 改成宿主共享的 WizardStart:先等能力真就绪(直接问后端),再直接调
+    // 启动函数;等不到就抛错让向导显示「重新开启模型」。
+    await _wizardStart({
+      label: "启动检测",
+      probe: vdCapabilitySnapshot,
+      start: () => vdDetectorStart(),
+    });
+    result.detector_started = true;
   }
 
   // 4. 启动音频理解(仅 audioPrompt 非空)
   if (opts.audioPrompt) {
-    const btn = document.getElementById("vd-audio-start");
-    if (btn) {
-      try { btn.click(); result.audio_started = true; }
-      catch (e) { throw new Error("WizardSnapshotError:audio_start_failed:" + (e?.message || e)); }
-    }
+    // 同样的坑：「分析音频」按钮的 disabled 也来自 1Hz 快照(available)，
+    // Omni 刚就绪时按钮还是灰的 → click() 被静默丢弃 → 音轨没跑起来。
+    await _wizardStart({
+      label: "分析音频",
+      probe: vdAudioCapabilitySnapshot,
+      isReady: (s) => !!(s && s.available !== false),
+      // 「跑起来了」= extracting(在跑)或 done(秒跑完) —— 音轨分析对一段
+      // 空音频可能瞬间跑完,只认 extracting 会把成功误报成失败。
+      isStarted: (s) => !!(s && (s.state === "extracting" || s.state === "done")),
+      start: () => AudioAnalysis.start?.(),
+    });
+    result.audio_started = true;
   }
 
   return result;
