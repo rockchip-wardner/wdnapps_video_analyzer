@@ -452,21 +452,17 @@ function updateVtdDetectorStatus(snap, session) {
   const chCount = ((session && session.channel_list) || []).length;
   const setState = (s) => { if (pillEl) pillEl.dataset.state = s; };
   const booting = !!(VTD.boot && VTD.boot.pending);
+  const capReady = !!snap.session_ready;
+  const capLoading = !!snap.model_loading;
   if (!snap.available) {
     statusEl.textContent = "模型不可用";
     setState("error");
-  } else if (snap.model_loading) {
-    // 「还在加载」不等于「加载失败」。开机 autostart 后模型必然先 loading
-    // 那 ~40s，原先这个窗口一律显示「模型加载失败」，是在报一个还没发生的故障。
+  } else if (capLoading) {
     statusEl.textContent = booting
       ? "正在等待模型加载…（开机自启，完成后自动开始检测）"
       : "正在等待模型加载…";
     setState("warn");
-  } else if (snap.init_error) {
-    statusEl.textContent = "模型加载失败";
-    setState("error");
-    console.warn("[vtd] 模型加载失败:", snap.init_error);
-  } else if (snap.enabled && snap.session_ready) {
+  } else if (snap.enabled && capReady) {
     // 面向终端客户：只说"在跑 / 正在看几路"，不暴露队列、尺寸、轮次等内部状态
     const slots = snap.slot_count > 1 ? `（${snap.slot_count} 张卡并行）` : "";
     statusEl.textContent = chCount
@@ -476,13 +472,26 @@ function updateVtdDetectorStatus(snap, session) {
   } else if (snap.enabled) {
     statusEl.textContent = "正在加载模型…";
     setState("warn");
-  } else {
+  } else if (capReady) {
     statusEl.textContent = "检测未启动";
     setState("idle");
+  } else if (snap.init_error && !/功能未启用/.test(snap.init_error)) {
+    statusEl.textContent = "模型加载失败";
+    setState("error");
+    console.warn("[vtd] 模型加载失败:", snap.init_error);
+  } else {
+    statusEl.textContent = "功能未启用：请先在算力配置启用 [VLM] 视觉描述模型";
+    setState("idle");
+    if (snap.init_error) console.warn("[vtd] 能力未就绪:", snap.init_error);
   }
-  // 等待模型期间锁死按钮：get_session() 只认 running，此刻点必然 502。
   if (startBtn) {
-    startBtn.disabled = !snap.available || !!snap.enabled || booting;
+    startBtn.disabled = !snap.available || !capReady || capLoading
+      || !!snap.enabled || booting;
+    startBtn.title = capReady
+      ? (booting ? "正在等待开机自启恢复…" : "")
+      : (capLoading
+          ? "模型加载中，请稍候…"
+          : "功能未启用：请先在算力配置启用 [VLM] 视觉描述模型");
   }
   if (stopBtn)  stopBtn.disabled  = !snap.enabled;
   VTD.detectorSnap = snap;

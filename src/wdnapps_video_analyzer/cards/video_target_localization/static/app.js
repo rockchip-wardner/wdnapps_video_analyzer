@@ -659,31 +659,38 @@ function updateVtlDetectorStatus(snap) {
   // booting 仍是 true，按钮会多锁一帧。
   const boot = window.BootRestore?.tick(VTL.boot, snap);
   const booting = !!(VTL.boot && VTL.boot.pending);
+  const capReady = !!snap.session_ready;
+  const capLoading = !!snap.model_loading;
   if (!snap.available) {
     statusEl.textContent = "不可用: " + (snap.init_error || "wdnai 未安装");
-  } else if (snap.model_loading) {
-    // 「还在加载」不等于「加载失败」。开机 autostart 后 grounding 模型必然
-    // 先 loading 那 ~40s，原先这个窗口一律显示「模型加载失败」。
+  } else if (capLoading) {
     statusEl.textContent = booting
       ? "正在等待模型加载…（开机自启，完成后自动开始定位）"
       : "正在等待模型加载…";
-  } else if (snap.init_error) {
-    statusEl.textContent = "模型加载失败: " + snap.init_error;
-  } else if (snap.enabled && snap.session_ready) {
+  } else if (snap.enabled && capReady) {
     const slots = snap.slot_count > 1 ? ` · ${snap.slot_count} 张卡并行` : "";
     statusEl.textContent =
       `运行中 · 每 ${snap.judge?.every_n ?? snap.every_n} 帧 · 队列 ${snap.queue_size} · 视觉定位${slots}`;
   } else if (snap.enabled) {
     statusEl.textContent =
       `已启动，加载模型… (首次约 30s，队列 ${snap.queue_size})`;
-  } else if (snap.session_ready) {
+  } else if (capReady) {
     statusEl.textContent = "已加载";
+  } else if (snap.init_error && !/功能未启用/.test(snap.init_error)) {
+    statusEl.textContent = "模型加载失败: " + snap.init_error;
   } else {
-    statusEl.textContent = "已安装但未启动";
+    statusEl.textContent =
+      "功能未启用：请先在算力配置启用 [GD] 视觉定位模型";
+    if (snap.init_error) console.warn("[vtl] 能力未就绪:", snap.init_error);
   }
-  // 等待模型期间锁死按钮：get_session() 只认 running，此刻点必然 502。
   if (startBtn) {
-    startBtn.disabled = !snap.available || !!snap.enabled || booting;
+    startBtn.disabled = !snap.available || !capReady || capLoading
+      || !!snap.enabled || booting;
+    startBtn.title = capReady
+      ? (booting ? "正在等待开机自启恢复…" : "")
+      : (capLoading
+          ? "模型加载中，请稍候…"
+          : "功能未启用：请先在算力配置启用 [GD] 视觉定位模型");
   }
   if (stopBtn)  stopBtn.disabled  = !snap.enabled;
   VTL.detectorSnap = snap;
