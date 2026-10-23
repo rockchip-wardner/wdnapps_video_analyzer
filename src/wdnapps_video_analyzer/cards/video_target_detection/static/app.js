@@ -15,7 +15,7 @@ const VTD_DIAG = {
 };
 window.__vtdDiag = VTD_DIAG;
 // 画面为空时的提示文案（提示层唯一真相源，避免多处各写一份）
-const VTD_EMPTY_HINT = "尚未打开视频\n\n在右侧填入视频地址后点击「打开视频」";
+const VTD_EMPTY_HINT = "尚未播放视频\n\n在右侧填入视频地址后点击「播放视频」";
 function _diag(ev, extra) {
   if (VTD_DIAG.log.length > 200) VTD_DIAG.log.shift();
   VTD_DIAG.log.push(extra ? ev + " " + extra : ev);
@@ -61,7 +61,7 @@ function updateVtdTiles(session) {
   if (hint) {
     // 面向终端客户：只说"几路、通没通"，不暴露分辨率 / 帧率等技术细节
     if (!total) {
-      hint.textContent = "尚未打开视频";
+      hint.textContent = "尚未播放视频";
       if (pill) pill.dataset.state = "idle";
     } else if (ok === total) {
       hint.textContent = `${total} 路视频 · 全部正常`;
@@ -181,7 +181,7 @@ function readVtdSources() {
 
 /** 读文本框 → 校验 → 建宫格 → 调后端打开。返回 {ok, snap} 或 {ok:false, reason}。
  *
- *  **「打开视频」按钮和向导的 applyWizardSnapshot 必须共用这一条路径。**
+ *  **「播放视频」按钮和向导的 applyWizardSnapshot 必须共用这一条路径。**
  *
  *  曾踩的坑：向导那边写的是
  *      await vtdOpen({ source: opts.source, loop });
@@ -664,8 +664,21 @@ function initVideoTargetDetection() {
   const loopEl   = document.getElementById("vtd-loop");
   const openBtn = document.getElementById("vtd-open");
   const closeBtn = document.getElementById("vtd-close");
+  const browseBtn = document.getElementById("vtd-browse");
+  const sourceEl  = document.getElementById("vtd-sources");
 
   openBtn.addEventListener("click", () => openVtdFromTextarea());
+
+  // 「浏览…」—— 打开共享文件选择器（选到的是**服务器所在设备**上的路径，
+  // 不是浏览器本机上传）。目标换成 textarea 后 fs-modal 走的是**追加一行**
+  // 而不是整体替换：选一个文件 = 往源列表加一路，正是多路要的语义
+  // （同 vd / vtl 的「浏览…」）。
+  if (browseBtn && sourceEl) {
+    browseBtn.addEventListener("click", () => {
+      window.VdFsModal._sourceTarget = sourceEl;
+      window.VdFsModal.open("");
+    });
+  }
 
   closeBtn.addEventListener("click", async () => {
     try { await vtdClose(); } catch (_) {}

@@ -10,7 +10,7 @@
             <!-- 画面上方的状态条：两个圆点标签，一眼看出"视频通没通 / 检测跑没跑" -->
             <div class="vtd-stagebar">
               <span class="vtd-pill" id="vtd-pill-video" data-state="idle">
-                <i class="vtd-dot"></i><span id="vtd-channel-hint">尚未打开视频</span>
+                <i class="vtd-dot"></i><span id="vtd-channel-hint">尚未播放视频</span>
               </span>
               <span class="vtd-pill" id="vtd-pill-det" data-state="idle">
                 <i class="vtd-dot"></i><span id="vtd-detector-status">检测未启动</span>
@@ -29,13 +29,15 @@
               <section class="surv-form-section">
                 <header class="surv-form-head">
                   <h3>视频源</h3>
+                  <span class="surv-hint">每行一路，最多 32 路</span>
                 </header>
                 <div class="surv-field">
                   <textarea id="vtd-sources" class="surv-input surv-textarea vtd-sources"
                             rows="6" spellcheck="false"
                             placeholder="每行一路，最多 32 路&#10;/userdata/assets/720p/rk-0.mp4&#10;rtsp://192.168.1.10:554/stream1"></textarea>
                   <div class="vd-actions-row">
-                    <button type="button" class="vd-btn vd-btn-primary" id="vtd-open">打开视频</button>
+                    <button type="button" class="vd-btn vd-btn-primary" id="vtd-browse">浏览…</button>
+                    <button type="button" class="vd-btn vd-btn-primary" id="vtd-open">播放视频</button>
                     <button type="button" class="vd-btn" id="vtd-close">关闭</button>
                     <label class="vd-loop-toggle" title="文件源播放完后自动从头重播；直播无效">
                       <input type="checkbox" id="vtd-loop" checked />

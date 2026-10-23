@@ -189,7 +189,7 @@ function updateVtlTiles(session) {
   }
   const hint = document.getElementById("vtl-channel-hint");
   if (hint) {
-    if (!total) hint.textContent = "尚未打开视频";
+    if (!total) hint.textContent = "尚未播放视频";
     else if (ok === total) hint.textContent = `${total} 路视频 · 全部正常`;
     else hint.textContent = `${total} 路视频 · ${ok} 路正常`;
   }
@@ -200,7 +200,7 @@ function updateVtlTiles(session) {
   else if (eof) setVtlOverlay(`${eof} 路视频已播完`, false);
   else if (total && ok === total) setVtlOverlay("", false);
   else if (total) setVtlOverlay("部分视频尚未出画面…", false);
-  else setVtlOverlay("尚未打开视频\n\n在右侧填入视频地址后点击「打开」", false);
+  else setVtlOverlay("尚未播放视频\n\n在右侧填入视频地址后点击「播放视频」", false);
 }
 
 // 宫格放大的接线。attach 必须在 IIFE 内：onError 要用私有的 setVtlOverlay。
@@ -840,7 +840,7 @@ function readVtlSources() {
   return out;
 }
 
-/** 打开视频的唯一入口 —— 「打开」按钮与向导的 applyWizardSnapshot 共用。
+/** 打开视频的唯一入口 —— 「播放视频」按钮与向导的 applyWizardSnapshot 共用。
  *
  *  曾踩过的坑（vtd 那边先踩）：向导里写的是 `vtlOpen({ source: opts.source })`，
  *  而 `opts.source` 是**整个多行文本框的内容**。后端 `source`（单数）是老前端的

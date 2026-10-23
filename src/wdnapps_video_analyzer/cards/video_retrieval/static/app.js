@@ -1386,7 +1386,7 @@ function initVideoRetrievalCore() {
   stopBtn?.addEventListener("click", vrStop);
 
   // 向导模式 / 手动预览 — 复用 vd 单例 VideoSession 跑连续预览帧流。
-  // 与 vd / vtd / vtl 的「打开 / 关闭」按钮行为一致:open 把 source/loop
+  // 与 vd / vtd / vtl 的「播放视频 / 关闭」按钮行为一致:open 把 source/loop
   // 写回后端,然后把后端 WS 帧流接到 #vr-canvas(已被 wizard 搬到
   // canvasWrap 内,getElementById 不变,直接画就行)。
   const openBtn  = vrEl("vr-open");

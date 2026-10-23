@@ -147,6 +147,13 @@
 .vtd-side .vd-actions-row { margin-top: 0.15rem; }
 .vtd-side .vd-btn { border-radius: 6px; }
 
+/* 源区按钮行：浏览… / 播放视频 / 关闭 + 循环播放开关。
+ * 排版与 vd / vtl 同款 —— 四个控件左对齐成组，顺序也一致
+ * （浏览… → 播放视频 → 关闭 → 循环播放）。
+ * 按钮加 flex:0 0 auto：不参与收缩，窄屏时文字不会被挤扁，
+ * 而是整个 .vd-actions-row（本身带 flex-wrap）整块换行。 */
+.vtd-side .vd-actions-row .vd-btn { flex: 0 0 auto; }
+
 /* ---- 检测记录 ---- */
 
 .vtd-events { padding: 0.8rem 1rem; }

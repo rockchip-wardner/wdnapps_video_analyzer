@@ -104,7 +104,7 @@ function updateVdTiles(session) {
   const { total, ok, eof } = window.MultiGrid.status(GRID_EL, list, cur);
   const hint = document.getElementById("vd-channel-hint");
   if (hint) {
-    if (!total) hint.textContent = "尚未打开视频";
+    if (!total) hint.textContent = "尚未播放视频";
     else if (ok === total) hint.textContent = `${total} 路视频 · 全部正常`;
     else hint.textContent = `${total} 路视频 · ${ok} 路正常`;
   }
@@ -124,7 +124,7 @@ window.ZoomFrame?.attach({
 
 /** 从视频源文本框读出 sources 列表（每行一路，去空行去重）。
  *
- *  **唯一解析入口**：「打开视频」按钮与向导 applyWizardSnapshot 都走它。
+ *  **唯一解析入口**：「播放视频」按钮与向导 applyWizardSnapshot 都走它。
  *  分成两份就会各自漂，然后在某条路径上退回"整个多行当一路"（向导里填多路
  *  就异常，填单路反而正常）。 */
 function readVdSources() {
