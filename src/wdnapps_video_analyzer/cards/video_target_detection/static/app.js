@@ -445,11 +445,23 @@ function updateVtdDetectorStatus(snap, session) {
   const startBtn = document.getElementById("vtd-detector-start");
   const stopBtn  = document.getElementById("vtd-detector-stop");
   if (!snap || !statusEl) return;
+  // tick **先**跑：它推进等待状态机，可能在这一步把 pending 清掉。
+  // 下面的 booting 必须读 tick **之后**的 pending —— 否则模型刚好就绪的那一帧
+  // booting 仍是 true，按钮会多锁一帧。
+  const boot = window.BootRestore?.tick(VTD.boot, snap);
   const chCount = ((session && session.channel_list) || []).length;
   const setState = (s) => { if (pillEl) pillEl.dataset.state = s; };
+  const booting = !!(VTD.boot && VTD.boot.pending);
   if (!snap.available) {
     statusEl.textContent = "模型不可用";
     setState("error");
+  } else if (snap.model_loading) {
+    // 「还在加载」不等于「加载失败」。开机 autostart 后模型必然先 loading
+    // 那 ~40s，原先这个窗口一律显示「模型加载失败」，是在报一个还没发生的故障。
+    statusEl.textContent = booting
+      ? "正在等待模型加载…（开机自启，完成后自动开始检测）"
+      : "正在等待模型加载…";
+    setState("warn");
   } else if (snap.init_error) {
     statusEl.textContent = "模型加载失败";
     setState("error");
@@ -468,12 +480,16 @@ function updateVtdDetectorStatus(snap, session) {
     statusEl.textContent = "检测未启动";
     setState("idle");
   }
-  if (startBtn) startBtn.disabled = !snap.available || !!snap.enabled;
+  // 等待模型期间锁死按钮：get_session() 只认 running，此刻点必然 502。
+  if (startBtn) {
+    startBtn.disabled = !snap.available || !!snap.enabled || booting;
+  }
   if (stopBtn)  stopBtn.disabled  = !snap.enabled;
   VTD.detectorSnap = snap;
   if (typeof DemoGuard !== "undefined") {
     DemoGuard.report("video-target-detection", { session: VTD.lastSnap, detector: VTD.detectorSnap });
   }
+  if (boot && boot.startNow) vtdBootAutoStart();
 }
 async function refreshVtdDetector() {
   try {
@@ -488,6 +504,67 @@ async function refreshVtdDetector() {
     return data;
   } catch (_) { return null; }
 }
+// ──────────────────────────────────────────────────────────────────────────
+// 开机自启恢复：记住「上次跑的是什么」，重启后照着复原
+//
+// 模型勾选**不在**这里存 —— model-pick.js 的 loadInstancePickMulti 已经用
+// localStorage（`vtd.instances`）存了，并在拉列表时自动复原。重复存一份只会
+// 造出两个真相来源。但它有个前提：列表得先拉起来，而列表只含 **running** 实例
+// （instances-by-capability 的契约），开机加载期是空的 —— 所以自动启动**之前**
+// 必须重拉一次勾选器，否则"一个都没勾"会让启动静默中止（见 vtdBootAutoStart）。
+// ──────────────────────────────────────────────────────────────────────────
+function vtdCollectLastRun() {
+  return {
+    sources: readVtdSources(),
+    prompt: (document.getElementById("vtd-prompt")?.value || "").trim(),
+    loop: !!document.getElementById("vtd-loop")?.checked,
+    rr_interval: document.getElementById("vtd-every-n")?.value || "",
+    saved_at: Date.now(),
+  };
+}
+
+function vtdApplyLastRun(s) {
+  if (!s) return;
+  const setVal = (id, v) => { const el = document.getElementById(id); if (el && v != null) el.value = v; };
+  if (Array.isArray(s.sources) && s.sources.length) setVal("vtd-sources", s.sources.join("\n"));
+  if (s.prompt) setVal("vtd-prompt", s.prompt);
+  if (s.rr_interval) setVal("vtd-every-n", s.rr_interval);
+  const loopEl = document.getElementById("vtd-loop");
+  if (loopEl && s.loop != null) loopEl.checked = !!s.loop;
+}
+
+async function vtdBootRestore(saved, h) {
+  vtdApplyLastRun(saved);
+  // 先 arm 让按钮立刻转圈，再后台开源。
+  window.BootRestore.arm(h);
+  const sources = Array.isArray(saved.sources) ? saved.sources.slice() : [];
+  if (sources.length) {
+    const r = await openVtdFromTextarea();
+    if (!r.ok) {
+      // 开源失败不阻断"等模型 + 自动启动检测"。
+      setVtdOverlay("自动恢复视频源失败: " + (r.reason || ""), true);
+    }
+  }
+}
+
+/** 模型就绪后的自动启动（由 updateVtdDetectorStatus 的 tick 触发）。 */
+async function vtdBootAutoStart() {
+  const h = VTD.boot;
+  if (!h || !h.saved) return;
+  setVtdOverlay("模型已就绪，正在自动启动检测…", false);
+  // 必须先重拉勾选器：页面初始化时模型还没起，instances-by-capability
+  // 返回空 → 勾选器是空的 → selectedModels 返回 null → 启动被静默中止。
+  // 与 applyWizardSnapshot 里同一段保持一致。
+  try {
+    await window.loadInstancePickMulti?.(PICK_ID, "swcap_vision_chat",
+                                         "vtd.instances");
+  } catch (e) {
+    setVtdOverlay("自动启动失败: 重拉模型列表出错 " + (e?.message || e), true);
+    return;
+  }
+  await vtdDetectorStart();
+}
+
 async function vtdDetectorStart() {
   const promptEl = document.getElementById("vtd-prompt");
   const everyEl  = document.getElementById("vtd-every-n");
@@ -533,6 +610,10 @@ async function vtdDetectorStart() {
     }
     const snap = await r.json();
     updateVtdDetectorStatus(snap);
+    // 只在成功启动后记账 —— 失败（没提示词 / 没勾模型 / 502）不写，
+    // 否则一次误点就会把空档案存成"上次跑的东西"，下次开机据此自动恢复
+    // 出一次根本没人想跑的检测。
+    window.BootRestore?.save("video-target-detection", vtdCollectLastRun());
     setVtdOverlay("", false);
   } catch (e) {
     setVtdOverlay("启动检测失败: " + e.message, true);
@@ -565,6 +646,16 @@ function initVideoTargetDetection() {
   setVtdOverlay(VTD_EMPTY_HINT, false);
 
   loadInstancePickMulti(PICK_ID, "swcap_vision_chat", "vtd.instances");
+  // 开机自启恢复：claim 是**一次性**的 —— 非开机恢复场景（用户自己点进卡）
+  // 拿到的 handle.claimed=false，整段恢复逻辑直接跳过，不会重开上次的源。
+  //
+  // restore 回调交给共享模块去**何时**调用：标记先到（bootRestore 跳过来）
+  // 就当场调，标记后到（刷新时 URL 已带 #<app_id>，卡片 IIFE 抢跑完了）
+  // 就由事件补调 —— 两种顺序都得能恢复，见 core/boot-restore.js 的注释。
+  VTD.boot = window.BootRestore?.begin("video-target-detection", {
+    startBtn: "vtd-detector-start",
+    restore: (saved, handle) => vtdBootRestore(saved, handle),
+  });
   // apiBase 指向本卡判据端点：/api/video/judge 操作的是单例 VideoSession
   // （vd / vtl 共用），本页走 MultiChannelSession，同 VR 挂自己的 judge_api。
   window.FrameJudge?.mount({ prefix: "vtd", canvasId: GRID_EL,
@@ -589,6 +680,8 @@ function initVideoTargetDetection() {
   if (detStopBtn)  detStopBtn.addEventListener("click",  vtdDetectorStop);
   if (evClearBtn)  evClearBtn.addEventListener("click",  vtdEventsClear);
 
+  // 开机恢复：先回填表单 + arm（按钮立刻转圈），视频源后台异步打开。
+  // 不 await —— arm() 是同步的，等的是模型而不是这里。
   refreshVtdDetector();
   if (!VTD.ws && !VTD.wsTimer) connectVtdWs();
 }

@@ -359,8 +359,20 @@ function updateVdDetectorStatus(snap) {
   const startBtn = document.getElementById("vd-detector-start");
   const stopBtn  = document.getElementById("vd-detector-stop");
   if (!snap || !statusEl) return;
+  // tick **先**跑：它推进等待状态机，可能在这一步把 pending 清掉。
+  // 下面的 booting 必须读 tick **之后**的 pending —— 否则模型刚好就绪的那一帧
+  // booting 仍是 true，按钮会多锁一帧（用户看到"就绪了但按钮还是灰的"）。
+  const boot = window.BootRestore?.tick(VD.boot, snap);
+  const booting = !!(VD.boot && VD.boot.pending);
   if (!snap.available) {
     statusEl.textContent = "不可用: " + (snap.init_error || "wdnai 未安装");
+  } else if (snap.model_loading) {
+    // 「模型还在加载」不是错误。原先这里直接落到 init_error 分支，显示
+    // 「模型加载失败: 功能未启用: swcap_vision_chat」——开机 autostart 后
+    // 那 ~40s 里模型必然处于这个状态，说成"失败"是误导。
+    statusEl.textContent = booting
+      ? "正在等待模型加载…（开机自启，完成后自动开始检测）"
+      : "正在等待模型加载…";
   } else if (snap.init_error) {
     statusEl.textContent = "模型加载失败: " + snap.init_error;
   } else if (snap.enabled && snap.session_ready) {
@@ -379,7 +391,11 @@ function updateVdDetectorStatus(snap) {
   } else {
     statusEl.textContent = "已安装但未启动";
   }
-  if (startBtn) startBtn.disabled = !snap.available || !!snap.enabled;
+  // 等待模型期间按钮必须锁死：get_session() 只认 status=="running"，
+  // 此刻点「启动检测」必然 502「功能未启用」。
+  if (startBtn) {
+    startBtn.disabled = !snap.available || !!snap.enabled || booting;
+  }
   if (stopBtn)  stopBtn.disabled  = !snap.enabled;
   VD.detectorSnap = snap;
   if (typeof DemoGuard !== "undefined") {
@@ -389,6 +405,7 @@ function updateVdDetectorStatus(snap) {
       audio:    VD.audioSnap,
     });
   }
+  if (boot && boot.startNow) vdBootAutoStart();
 }
 
 async function refreshVdDetector() {
@@ -413,6 +430,74 @@ async function refreshVdDetector() {
 }
 
 
+
+// ──────────────────────────────────────────────────────────────────────────
+// 开机自启恢复：记住「上次跑的是什么」，重启后照着复原
+//
+// 为什么在这里存、而不是存进 config.jsonc：视频源是本地路径/摄像头 URL
+// （可能带鉴权参数），写进要提交进 git 的配置文件不合适；而且这张卡要的是
+// 「这台机器上次看到的源」，本来就有很强的本机属性。localStorage 跟着浏览器
+// 走，同一台板子同一个浏览器重启浏览器即可复现。
+//
+// **只存能可靠复原的字段。** `vd-model-pick` / `vd-detect-size` 两个下拉框
+// 的选项是**运行时按 running 实例动态灌进去**的（loadModelPick /
+// available_image_sizes），开机那一刻模型还没加载，选项是空的 —— 此时写
+// value 必然落空，恢复出一个"看起来填了其实没生效"的假状态。它们默认就是
+// auto，不复原没有损失。
+// ──────────────────────────────────────────────────────────────────────────
+function vdCollectLastRun() {
+  return {
+    sources: readVdSources(),
+    prompt: (document.getElementById("vd-prompt")?.value || "").trim(),
+    loop: !!document.getElementById("vd-loop")?.checked,
+    every_n: document.getElementById("vd-every-n")?.value || "",
+    saved_at: Date.now(),
+  };
+}
+
+function vdApplyLastRun(s) {
+  if (!s) return;
+  const setVal = (id, v) => { const el = document.getElementById(id); if (el && v != null) el.value = v; };
+  if (Array.isArray(s.sources) && s.sources.length) setVal("vd-sources", s.sources.join("\n"));
+  if (s.prompt) setVal("vd-prompt", s.prompt);
+  // every_n 是静态 <select>，选项一直都在，可以安全复原。
+  if (s.every_n) setVal("vd-every-n", s.every_n);
+  const loopEl = document.getElementById("vd-loop");
+  if (loopEl && s.loop != null) loopEl.checked = !!s.loop;
+  // 源变了 → 音轨面板的「音频源」标签要跟着变。
+  window.AudioAnalysis?.refreshSource?.();
+}
+
+async function vdBootRestore(saved, h) {
+  vdApplyLastRun(saved);
+  // 先 arm 再开视频：开源要走 HTTP，几十毫秒到数秒；不等它结束就该让按钮
+  // 转起来，否则用户会看到“按钮可点但一点就 502”的旧窗口。
+  window.BootRestore.arm(h);
+  const sources = Array.isArray(saved.sources) ? saved.sources.slice() : [];
+  if (sources.length) {
+    try {
+      const check = validateVdSources();
+      if (check.ok) {
+        window.MultiGrid.ensure(GRID_EL, check.sources.length);
+        await vdOpen({ sources: check.sources, loop: !!saved.loop });
+        const meta = document.getElementById("vd-source-meta");
+        if (meta) meta.textContent = check.sources.length > 1
+          ? `已打开 ${check.sources.length} 路` : "已选: " + check.sources[0];
+      }
+    } catch (e) {
+      // 开源失败不影响"等模型 + 自动启动检测" —— 检测照样能起来，只是没画面。
+      setVdOverlay("自动恢复视频源失败: " + (e?.message || e), true);
+    }
+  }
+}
+
+/** 模型就绪后的自动启动（由 updateVdDetectorStatus 的 tick 触发）。 */
+async function vdBootAutoStart() {
+  const h = VD.boot;
+  if (!h || !h.saved) return;
+  setVdOverlay("模型已就绪，正在自动启动检测…", false);
+  await vdDetectorStart();
+}
 
 async function vdDetectorStart() {
   const promptEl  = document.getElementById("vd-prompt");
@@ -459,6 +544,10 @@ async function vdDetectorStart() {
     }
     const snap = await r.json();
     updateVdDetectorStatus(snap);
+    // 只在**成功启动**后记账。失败（缺提示词 / 502 / 网络）不写 —— 否则一次
+    // 误点就会把一份空档案存成"上次跑的东西"，下次开机据此自动恢复出一次
+    // 根本没人想跑的检测。
+    window.BootRestore?.save("video-detection", vdCollectLastRun());
     setVdOverlay("", false);
   } catch (e) {
     setVdOverlay("启动检测失败: " + e.message, true);
@@ -600,6 +689,17 @@ function initVideoDetection() {
   loadModelPick("vd-model-pick", "swcap_vision_chat", "vd.model_id");
   loadModelPick("vd-audio-model-pick", "swcap_audio_chat", "vd.audio.model_id");
 
+  // 开机自启恢复：claim 是**一次性**的 —— 非开机恢复场景（用户自己点进卡）
+  // 拿到的 handle.claimed=false，整段恢复逻辑直接跳过，不会重开上次的源。
+  //
+  // restore 回调交给共享模块去**何时**调用：标记先到（bootRestore 跳过来）
+  // 就当场调，标记后到（刷新时 URL 已带 #<app_id>，卡片 IIFE 抢跑完了）
+  // 就由事件补调 —— 两种顺序都得能恢复，见 core/boot-restore.js 的注释。
+  VD.boot = window.BootRestore?.begin("video-detection", {
+    startBtn: "vd-detector-start",
+    restore: (saved, handle) => vdBootRestore(saved, handle),
+  });
+
   // 帧判据浮层（角标 + 曲线）锚在**画面容器**上，多路宫格里没有单一 canvas。
   // **apiBase 指向本卡**：判据挂在 MultiChannelSession 上，不是
   // /api/video/judge 操作的那个单例 VideoSession。
@@ -716,6 +816,9 @@ function initVideoDetection() {
   if (evClearBtn)  evClearBtn.addEventListener("click",  vdEventsClear);
 
   // ...
+  // 开机恢复：先回填表单 + arm（按钮立刻转圈），视频源在后台异步打开。
+  // **不 await** —— arm() 本身是同步的，等价于"立刻进入等待态"；真正要等的
+  // 是模型，那由 refreshVdDetector / WS 的快照经 tick 推进，与开源并行。
   refreshVdDetector();
   vdLoadTools();
   // 音轨面板由共享模块在 mount() 时自装配（按钮 + WS + 首次快照），

@@ -654,8 +654,19 @@ function updateVtlDetectorStatus(snap) {
   const startBtn = document.getElementById("vtl-detector-start");
   const stopBtn  = document.getElementById("vtl-detector-stop");
   if (!snap || !statusEl) return;
+  // tick **先**跑：它推进等待状态机，可能在这一步把 pending 清掉。
+  // 下面的 booting 必须读 tick **之后**的 pending —— 否则模型刚好就绪的那一帧
+  // booting 仍是 true，按钮会多锁一帧。
+  const boot = window.BootRestore?.tick(VTL.boot, snap);
+  const booting = !!(VTL.boot && VTL.boot.pending);
   if (!snap.available) {
     statusEl.textContent = "不可用: " + (snap.init_error || "wdnai 未安装");
+  } else if (snap.model_loading) {
+    // 「还在加载」不等于「加载失败」。开机 autostart 后 grounding 模型必然
+    // 先 loading 那 ~40s，原先这个窗口一律显示「模型加载失败」。
+    statusEl.textContent = booting
+      ? "正在等待模型加载…（开机自启，完成后自动开始定位）"
+      : "正在等待模型加载…";
   } else if (snap.init_error) {
     statusEl.textContent = "模型加载失败: " + snap.init_error;
   } else if (snap.enabled && snap.session_ready) {
@@ -670,7 +681,10 @@ function updateVtlDetectorStatus(snap) {
   } else {
     statusEl.textContent = "已安装但未启动";
   }
-  if (startBtn) startBtn.disabled = !snap.available || !!snap.enabled;
+  // 等待模型期间锁死按钮：get_session() 只认 running，此刻点必然 502。
+  if (startBtn) {
+    startBtn.disabled = !snap.available || !!snap.enabled || booting;
+  }
   if (stopBtn)  stopBtn.disabled  = !snap.enabled;
   VTL.detectorSnap = snap;
   if (typeof DemoGuard !== "undefined") {
@@ -679,6 +693,7 @@ function updateVtlDetectorStatus(snap) {
       detector: VTL.detectorSnap,
     });
   }
+  if (boot && boot.startNow) vtlBootAutoStart();
 }
 
 async function refreshVtlDetector() {
@@ -693,6 +708,67 @@ async function refreshVtlDetector() {
     }
     return data;
   } catch (_) { return null; }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// 开机自启恢复：记住「上次跑的是什么」，重启后照着复原
+//
+// 查询词用**数组**存（定位可以一次问多个目标），复用 _vtlWizardSyncPrompts
+// 把它写回 #vtl-prompt-rows —— 和向导走同一条路，不另写一份铺行逻辑。
+// 模型勾选同样不在这里存（model-pick.js 已用 `vtl.instances` 存了），但
+// 列表只含 running 实例，自动启动前必须重拉，见 vtlBootAutoStart。
+// ──────────────────────────────────────────────────────────────────────────
+function vtlCollectLastRun() {
+  return {
+    sources: readVtlSources(),
+    prompts: vtlPromptCollectItems(),
+    loop: !!document.getElementById("vtl-loop")?.checked,
+    saved_at: Date.now(),
+  };
+}
+
+function vtlApplyLastRun(s) {
+  if (!s) return;
+  if (Array.isArray(s.sources) && s.sources.length) {
+    const ta = document.getElementById("vtl-sources");
+    if (ta) ta.value = s.sources.join("\n");
+  }
+  const prompts = Array.isArray(s.prompts)
+    ? s.prompts.map((p) => (p || "").trim()).filter((p) => p.length > 0)
+    : [];
+  if (prompts.length) _vtlWizardSyncPrompts(prompts);
+  const loopEl = document.getElementById("vtl-loop");
+  if (loopEl && s.loop != null) loopEl.checked = !!s.loop;
+}
+
+async function vtlBootRestore(saved, h) {
+  vtlApplyLastRun(saved);
+  // 先 arm 让按钮立刻转圈，再后台开源。
+  window.BootRestore.arm(h);
+  const sources = Array.isArray(saved.sources) ? saved.sources.slice() : [];
+  if (sources.length) {
+    const r = await openVtlFromTextarea();
+    if (!r || !r.ok) {
+      setVtlOverlay("自动恢复视频源失败", true);
+    }
+  }
+}
+
+/** 模型就绪后的自动启动（由 updateVtlDetectorStatus 的 tick 触发）。 */
+async function vtlBootAutoStart() {
+  const h = VTL.boot;
+  if (!h || !h.saved) return;
+  setVtlOverlay("模型已就绪，正在自动启动定位…", false);
+  // 必须先重拉勾选器：页面初始化时模型还没起，instances-by-capability
+  // 返回空 → 勾选器是空的 → selectedModels 返回 null → 启动被静默中止。
+  try {
+    await window.loadInstancePickMulti?.(PICK_ID, "swcap_vision_grounding",
+                                         "vtl.instances");
+  } catch (e) {
+    setVtlOverlay("自动启动失败: 重拉模型列表出错 " + (e?.message || e), true);
+    return;
+  }
+  await vtlDetectorStart();
 }
 
 async function vtlDetectorStart() {
@@ -725,6 +801,8 @@ async function vtlDetectorStart() {
     }
     const snap = await r.json();
     updateVtlDetectorStatus(snap);
+    // 只在成功启动后记账 —— 失败（没查询词 / 没勾模型 / 502）不写。
+    window.BootRestore?.save("video-target-localization", vtlCollectLastRun());
     setVtlOverlay("", false);
   } catch (e) {
     setVtlOverlay("启动定位失败: " + e.message, true);
@@ -812,6 +890,16 @@ function initVideoTargetLocalization() {
   window.__vtlInit = true;
 
   loadInstancePickMulti(PICK_ID, "swcap_vision_grounding", "vtl.instances");
+  // 开机自启恢复：claim 是**一次性**的 —— 非开机恢复场景（用户自己点进卡）
+  // 拿到的 handle.claimed=false，整段恢复逻辑直接跳过，不会重开上次的源。
+  //
+  // restore 回调交给共享模块去**何时**调用：标记先到（bootRestore 跳过来）
+  // 就当场调，标记后到（刷新时 URL 已带 #<app_id>，卡片 IIFE 抢跑完了）
+  // 就由事件补调 —— 两种顺序都得能恢复，见 core/boot-restore.js 的注释。
+  VTL.boot = window.BootRestore?.begin("video-target-localization", {
+    startBtn: "vtl-detector-start",
+    restore: (saved, handle) => vtlBootRestore(saved, handle),
+  });
 
   const sourceEl = document.getElementById("vtl-sources");
   const loopEl   = document.getElementById("vtl-loop");
@@ -900,6 +988,9 @@ function initVideoTargetLocalization() {
   refreshVtlDetector();
   if (!VTL.ws && !VTL.wsTimer) connectVtlWs();
   initVtlPromptRows();
+  // 开机恢复：先回填表单 + arm（按钮立刻转圈），视频源后台异步打开。
+  // 放在 initVtlPromptRows() **之后** —— 查询词要写进 #vtl-prompt-rows，
+  // 行还没建出来就写会丢。
 }
 
 /* ---- 定位提示词行：增删 / 编号 / 收集 ---- */
