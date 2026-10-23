@@ -32,7 +32,8 @@
       "fields": [
         { "id": "vtl-prompt-rows", "ui_key": "prompts", "label": "定位目标描述",
           "type": "prompt_rows", "min_rows": 1, "max_rows": 20,
-          "placeholder": "例:穿着红衬衫的人" }
+          "default_rows": ["穿着红衬衫的人", ""],
+          "placeholder": "例：穿着红衬衫的人" }
       ]
     },
     { "id": "finish", "title": "完成配置",          "kind": "finish" }
