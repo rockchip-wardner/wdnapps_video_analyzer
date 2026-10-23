@@ -1356,7 +1356,6 @@ function initVideoRetrievalCore() {
   if (VR.initialized) return;
   VR.initialized = true;
 
-  const refreshBtn = vrEl("vr-refresh");
   const browseBtn = vrEl("vr-browse");
   const startBtn = vrEl("vr-start");
   const stopBtn = vrEl("vr-stop");
@@ -1381,7 +1380,6 @@ function initVideoRetrievalCore() {
     VdFsModal._sourceTarget = sourceEl;
     VdFsModal.open("");
   });
-  refreshBtn?.addEventListener("click", vrRefreshAll);
   startBtn?.addEventListener("click", vrStart);
   stopBtn?.addEventListener("click", vrStop);
 
