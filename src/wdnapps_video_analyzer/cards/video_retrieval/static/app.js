@@ -779,6 +779,14 @@ function vrPlaySegment(hit, opts) {
     });
   }
   vrClosePreviewWs();   // 抢占 canvas：关掉视频源预览（含其按钮态）
+  // **还要把后端解码也停掉**：只关 WS 的话，共享 VideoSession 的解码线程
+  // 会一直解下去 + 一直编 JPEG（没有订阅者也照编，broadcast 遍历空列表
+  // 而已）—— 预览变成向导默认态之后，这条常驻路径就从"偶发"变成"每次"。
+  // /source/close 只关预览那路（共享 session），不碰检索侧（PyAV 切片）。
+  try {
+    fetch(API_PREFIX + "/video-retrieval/source/close", { method: "POST" })
+      .catch(() => {});
+  } catch (_) { /* ignore */ }
   VR.previewPlaying = false;
   VR.previewPaused = false;
   vrRestoreSegmentUI();  // 预览隐藏过进度条/时间，播片段前还原
@@ -852,9 +860,13 @@ function vrClosePlayWs(settle) {
 //  ws 帧流走 /api/video-retrieval/source/ws)。                  *
 //  与 vrPlaySegment(检索命中片段回放)互斥 — 共用 #vr-canvas,         *
 //  不能同时写。打开预览前关掉检索播放,反之亦然。                       *
+//                                                                   *
+//  返回 true=预览已起 / false=打不开。向导要靠这个返回值决定要不要  *
+//  往下走(预览失败**不**阻断检索 —— 两条通路彼此独立，见              *
+//  applyWizardSnapshot 的注释)。                                      *
 // ------------------------------------------------------------------ *
 async function vrOpenPreview(source, loop) {
-  if (!source) { vrShowError("请先选择视频源"); return; }
+  if (!source) { vrShowError("请先选择视频源"); return false; }
   vrClosePlayWs(false);                 // 抢占 canvas:先关掉可能存在的检索播放
   await vrClosePreviewWs();             // 重新打开前确保上一路 preview WS 已关
   try {
@@ -866,10 +878,10 @@ async function vrOpenPreview(source, loop) {
     if (!r.ok) {
       const detail = await r.text().catch(() => "");
       vrShowError("打开失败: HTTP " + r.status + " " + detail);
-      return;
+      return false;
     }
     const snap = await r.json();
-    if (snap && snap.error) { vrShowError("打开失败: " + snap.error); return; }
+    if (snap && snap.error) { vrShowError("打开失败: " + snap.error); return false; }
     vrShowError("");
     vrSetSourceMeta("已选: " + source);
     vrConnectPreviewWs();
@@ -878,8 +890,14 @@ async function vrOpenPreview(source, loop) {
     VR.previewPaused = false;
     vrSetPreviewUI(true);
     if (VR._vrSourceStatus) VR._vrSourceStatus(snap);
+    // 上报 DemoGuard —— 预览在跑 = 页面有后台在跑：离开页面前要拦一下，
+    // 停掉时也会走 stop_endpoints 里的 /source/close（关掉共享解码）。
+    // 与 vtd / vtl / vd 的 session.state=playing 同口径。
+    if (typeof DemoGuard !== "undefined") vrReport();
+    return true;
   } catch (e) {
     vrShowError("打开失败: " + (e?.message || e));
+    return false;
   }
 }
 
@@ -894,6 +912,7 @@ async function vrClosePreview() {
   vrSetPreviewUI(false);
   vrSetSourceMeta("尚未选择");
   if (VR._vrSourceStatus) VR._vrSourceStatus(null);
+  if (typeof DemoGuard !== "undefined") vrReport();
 }
 
 function vrConnectPreviewWs() {
@@ -1238,12 +1257,17 @@ function vrRefreshAll() {
   vrRefreshModeAvail().catch(() => {});
 }
 
-// DemoGuard 上报：只上报检索运行态。
+// DemoGuard 上报：检索运行态 + 播放/预览态。
 function vrReport() {
   if (typeof DemoGuard === "undefined") return;
   DemoGuard.report("video-retrieval", {
     search: VR.snap || {},
-    busy: !!VR.playing || (VR.snap && VR.snap.state === "extracting"),
+    // busy 覆盖三种"后台在跑"：命中片段回放 / 视频源预览 / 切片提取。
+    // **预览也要算**：它是共享 VideoSession 的解码线程，不报的话离开页面
+    // 不会被拦、停下时也不走 stop_endpoints → 后台一直解下去。
+    // 与 vtd / vtl / vd 的 session.state=playing 同口径。
+    busy: !!VR.playing || !!VR.previewPlaying
+          || (VR.snap && VR.snap.state === "extracting"),
   });
 }
 
@@ -1625,9 +1649,31 @@ window.ImApp_video_retrieval.applyWizardSnapshot = async function (opts) {
   // 切片参数固化为服务端常量（4s / 重叠 1s），向导不再收集。
   const baseReady = !!opts.source;
   if (!baseReady) {
-    return { source_set: !!opts.source,
+    return { source_set: !!opts.source, source_opened: false,
              search_set: hasSearch, started: false };
   }
+
+  // 打开视频源 → 画面在播（与 vtd / vtl / vd 一致：向导跑完就有画面）。
+  //
+  // **两条通路彼此独立，别当一回事**：
+  //   * 预览 = 共享 VideoSession（MPP/RGA 解码）→ /source/open + /source/ws
+  //   * 检索 = VideoSearchService（PyAV 切片 + NPU embedding）→ /open + /extract
+  // 所以**预览打不开不阻断检索**（共享 session 正被别的卡占着、或某容器
+  // MPP 解不了而 PyAV 能切，检索照样能做）—— 只记一条 warn；真问题
+  //（源不存在之类）由检索自己的错误横幅报。
+  //
+  // 顺序：先开画面再启动检索 —— 等能力就绪最多 20s（WizardStart 的轮询
+  // 上限），这期间画面已经在播，用户不用盯着黑屏等。
+  let sourceOpened = false;
+  try {
+    sourceOpened = await vrOpenPreview(opts.source, !!(opts.loop));
+  } catch (e) {
+    console.warn("[vr-wizard] 视频源预览打开异常:", e);
+  }
+  if (!sourceOpened) {
+    console.warn("[vr-wizard] 视频源预览没起来（检索不受影响）:", opts.source);
+  }
+
   // 勾选前先主动刷新一次算力可用性。向导在 _waitForModelsRunning 之后
   // 立即回调，而前端 modeAvail 走 5s 周期，此刻可能仍是"未启用"旧值。
   //
@@ -1643,7 +1689,7 @@ window.ImApp_video_retrieval.applyWizardSnapshot = async function (opts) {
     isStarted: (s) => !(s && s.error),
     start: () => vrStart(),
   });
-  return { source_set: true,
+  return { source_set: true, source_opened: sourceOpened,
            search_set: hasSearch, started: true };
 };
 

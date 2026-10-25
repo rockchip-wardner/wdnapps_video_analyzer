@@ -8,6 +8,7 @@
     }
   },
   "open_source_button": "vr-open",
+  "canvas_id": "vr-canvas",
   "upload_endpoint": "/api/video-retrieval/upload",
   "start_buttons": [
     "vr-start"
