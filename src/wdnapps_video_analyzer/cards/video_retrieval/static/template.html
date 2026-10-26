@@ -54,8 +54,8 @@
 
             <section class="surv-form-section">
               <header class="surv-form-head">
-                <h3>功能配置</h3>
-                <span class="surv-hint">检索模型就绪后自动启用</span>
+                <h3>检索配置</h3>
+                <span class="surv-hint">模型就绪后功能启用</span>
               </header>
               <div class="surv-field">
                 <div class="vr-mode-hint" id="vr-mode-hint" hidden></div>
@@ -63,8 +63,8 @@
 
               <div class="vr-subsection" id="vr-sub-search">
                 <header class="vr-sub-head">
-                  <h4>检索</h4>
-                  <span class="surv-hint">内容反查</span>
+                  <h4>描述</h4>
+                  <span class="surv-hint">提供文字 + 图片或其中之一进行反查</span>
                 </header>
                 <div class="surv-field">
                   <div class="vr-ta-wrap">
@@ -72,9 +72,29 @@
                               placeholder="例如：有人在搬箱子 / 货车驶入 / 穿红色衣服的人"></textarea>
                     <span class="vr-ta-count" id="vr-ta-count">0 / 50</span>
                   </div>
+                  <div class="vr-image-row">
+                    <input type="text" id="vr-image-path" class="surv-input"
+                           placeholder="图片路径"
+                           spellcheck="false" />
+                    <button type="button" class="vd-btn" id="vr-image-browse"
+                            title="从服务器选择一张图片">浏览</button>
+                    <button type="button" class="vd-btn" id="vr-image-upload"
+                            title="从本机上传一张图片">上传</button>
+                    <button type="button" class="vd-btn" id="vr-image-clear"
+                            title="清除检索图片">清除</button>
+                    <input type="file" id="vr-image-file" accept="image/*" hidden />
+                  </div>
+                  <div class="vr-image-preview" id="vr-image-preview" hidden>
+                    <img id="vr-image-thumb" alt="检索图片预览" />
+                    <span class="vd-meta" id="vr-image-name"></span>
+                  </div>
+                  <label class="vr-lenient-row">
+                    <input type="checkbox" id="vr-image-quality" checked />
+                    <span>图片质量检查（拒绝纯色 / 随机噪声图）</span>
+                  </label>
                   <label class="vr-lenient-row">
                     <input type="checkbox" id="vr-lenient" />
-                    <span>宽松匹配（直接采集 10 条得分最高的结果，不符合阈值预期的将会被标记"低于阈值"）</span>
+                    <span>宽松匹配（直接取 10 条得分最高的结果，不符合阈值的将会被标记"低于阈值"）</span>
                   </label>
                 </div>
               </div>

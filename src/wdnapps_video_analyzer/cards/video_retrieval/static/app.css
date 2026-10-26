@@ -7,3 +7,38 @@
   height: 14px;
   margin: 0;
 }
+
+
+/* 检索图片行（路径 + 浏览/上传/清除 + 缩略图） */
+.vr-image-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+.vr-image-row .surv-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.vr-image-row .vd-btn {
+  flex: none;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+.vr-image-preview {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+/* HTML `hidden` 的 UA 默认 display:none 会被上面的 display:flex 覆盖，
+   清除图片后预览区仍以空框占位（用户实测「缩略图位置显示异常」）。 */
+.vr-image-preview[hidden] { display: none; }
+.vr-image-preview img {
+  max-height: 56px;
+  max-width: 112px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: #000;
+  object-fit: contain;
+}

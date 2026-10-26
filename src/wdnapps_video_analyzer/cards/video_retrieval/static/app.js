@@ -260,6 +260,29 @@ function vrSyncStatusText() {
   vrSetStatus(text, err);
 }
 
+// 检索图片状态同步：路径 → 预览缩略图 / 文件名 / 清除按钮 + 起始按钮。
+function vrSyncImageState() {
+  const pathEl = vrEl("vr-image-path");
+  const preview = vrEl("vr-image-preview");
+  const thumb = vrEl("vr-image-thumb");
+  const nameEl = vrEl("vr-image-name");
+  const p = (pathEl?.value || "").trim();
+  if (thumb && p !== VR._imageThumbPath) {
+    VR._imageThumbPath = p;
+    if (p) {
+      thumb.src = API_PREFIX + "/video-retrieval/image/thumb?path="
+        + encodeURIComponent(p);
+      thumb.alt = "检索图片预览";
+    } else {
+      thumb.removeAttribute("src");
+    }
+  }
+  if (nameEl) nameEl.textContent = p ? p.split(/[\\/]/).pop() : "";
+  if (preview) preview.hidden = !p;
+  if (pathEl) pathEl.title = p || "";
+  vrUpdateButtons();
+}
+
 // 统一按钮可用性：算力可用性 / 视频源或缓存勾选 / 检索问题 / 提取运行态。
 function vrUpdateButtons() {
   const st = (VR.snap && VR.snap.state) || "idle";
@@ -281,20 +304,30 @@ function vrUpdateButtons() {
   if (subS) subS.classList.toggle("vr-subsection--off", searchOff);
   const textEl = vrEl("vr-text");
   const lenientEl = vrEl("vr-lenient");
+  const imagePathEl = vrEl("vr-image-path");
+  const imageQualityEl = vrEl("vr-image-quality");
+  const imageBtns = ["vr-image-browse", "vr-image-upload", "vr-image-clear"]
+    .map((id) => vrEl(id));
   if (textEl) textEl.disabled = searchOff;
   if (lenientEl) lenientEl.disabled = searchOff;
+  if (imagePathEl) imagePathEl.disabled = searchOff;
+  if (imageQualityEl) imageQualityEl.disabled = searchOff;
+  imageBtns.forEach((b) => { if (b) b.disabled = searchOff; });
 
   const qSearch = (textEl?.value || "").trim();
+  const hasImage = !!(imagePathEl?.value || "").trim();
+  const clearImageBtn = vrEl("vr-image-clear");
+  if (clearImageBtn) clearImageBtn.disabled = searchOff || !hasImage;
   const extracting = st === "extracting";
   const canStart = !searchOff && !extracting
-    && (!!src || anyChecked) && !!qSearch;
+    && (!!src || anyChecked) && (!!qSearch || hasImage);
   if (startBtn) {
     startBtn.disabled = !canStart;
     let reason = "";
     if (!canStart) {
       if (searchOff) reason = "检索模型未启用，请先在「算力配置」启用";
       else if (!src && !anyChecked) reason = "请选择视频文件，或在历史记录里勾选已缓存视频";
-      else if (!qSearch) reason = "请填写检索问题";
+      else if (!qSearch && !hasImage) reason = "请填写检索问题或选择检索图片";
       else if (extracting) reason = "检索提取进行中";
     }
     startBtn.title = reason;
@@ -509,6 +542,8 @@ function vrApplyMutualExclusion() {
 }
 
 async function vrQueryMulti(text, minResults) {
+  const imagePath = (vrEl("vr-image-path")?.value || "").trim();
+  const quality = !!vrEl("vr-image-quality")?.checked;
   // 勾选路径：按窗口选中顺序（窗口行序 = analyzed_at 倒序）检索。
   const entries = [];
   const win = vrEl("vr-cache-window");
@@ -535,13 +570,18 @@ async function vrQueryMulti(text, minResults) {
   const list = vrEl("vr-results-list");
   if (list) list.innerHTML = '<li class="vr-results-empty">检索中…</li>';
   const count = vrEl("vr-results-count");
-  if (count) count.textContent = "检索中…（" + entries.length + " 个视频）";
+  if (count) {
+    count.textContent = (imagePath ? "以图检索中…（" : "检索中…（")
+      + entries.length + " 个视频）";
+  }
   try {
     const r = await fetch(API_PREFIX + "/video-retrieval/query_multi", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         text, min_results: minResults || 0, entries,
+        ...(imagePath ? { image_path: imagePath } : {}),
+        check_image_quality: quality,
       }),
     });
     if (!r.ok) {
@@ -688,7 +728,10 @@ function vrRenderHits(hits, query) {
     if (count) count.textContent = "0 条";
     return;
   }
-  if (count) count.textContent = hits.length + " 条";
+  if (count) {
+    count.textContent = (query && query.image ? "以图检索 · " : "")
+      + hits.length + " 条";
+  }
   const srcBase = (VR.snap && VR.snap.source) || "";
   const fpsBase = (VR.snap && Number(VR.snap.fps)) || 25;
   list.innerHTML = hits.map((h, i) => {
@@ -1308,6 +1351,7 @@ async function vrStart() {
   const src = (vrEl("vr-source")?.value || "").trim();
   const anyChecked = vrCheckedEntries().length > 0;
   const qSearch = (vrEl("vr-text")?.value || "").trim();
+  const hasImage = !!(vrEl("vr-image-path")?.value || "").trim();
   const avail = VR.modeAvail || { search: null };
 
   if (!src && !anyChecked) {
@@ -1317,7 +1361,9 @@ async function vrStart() {
     vrShowError(`「检索」功能未启用 —— 请先在「算力配置」启用 ${VR_MODE_LABEL.search}`);
     return;
   }
-  if (!qSearch) { vrShowError("请填写「检索」的检索问题"); return; }
+  if (!qSearch && !hasImage) {
+    vrShowError("请填写检索问题，或选择一张检索图片"); return;
+  }
   vrShowError("");
   await vrStartSearch(src, anyChecked);
   vrUpdateButtons();
@@ -1356,11 +1402,15 @@ const VR_LENIENT_TOP_K = 10;
 
 async function vrQuery() {
   const text = (vrEl("vr-text")?.value || "").trim();
-  // 兜底校验：「开始」在问题为空时已被 vrUpdateButtons 禁用，但本函数
-  // 还有第二条入口 —— 提取完成后 vrApplySnapshot 的 pendingQuery 自动
-  // 触发；提取期间（~90s）用户可能把问题清空，此守卫避免把空问题打到
-  // 后端（否则提示退化成 "启动失败: HTTP 400 检索问题不能为空"）。
-  if (!text) { vrShowError("请输入检索问题"); return; }
+  const imagePath = (vrEl("vr-image-path")?.value || "").trim();
+  const quality = !!vrEl("vr-image-quality")?.checked;
+  // 兜底校验：「开始」在问题/图片都为空时已被 vrUpdateButtons 禁用，但本
+  // 函数还有第二条入口 —— 提取完成后 vrApplySnapshot 的 pendingQuery 自动
+  // 触发；提取期间（~90s）用户可能把输入清空，此守卫避免把空查询打到
+  // 后端（否则提示退化成 "启动失败: HTTP 400 ..."）。
+  if (!text && !imagePath) {
+    vrShowError("请输入检索问题或选择检索图片"); return;
+  }
   if (vrQueryAbort) return;  // 已在检索中，防重复点击
   const countEl = vrEl("vr-results-count");
   // 宽松匹配在两条路径里都要读（分叉后各自携带 min_results 语义）
@@ -1376,9 +1426,11 @@ async function vrQuery() {
   }
   vrQueryAbort = new AbortController();
   const timer = setTimeout(() => vrQueryAbort.abort(), 40000);
-  if (countEl) countEl.textContent = "检索中…";
+  if (countEl) countEl.textContent = imagePath ? "以图检索中…" : "检索中…";
   try {
     const body = { text };
+    if (imagePath) body.image_path = imagePath;
+    body.check_image_quality = quality;
     // 严格模式（默认）：固定阈值 0.40 过滤后无命中就返回空。
     // 勾选"宽松匹配" → min_results=10，启用 fallback：
     //   阈值过滤完后无命中时补回 top-10（无视阈值，标"低于阈值"）。
@@ -1417,6 +1469,51 @@ function initVideoRetrievalCore() {
   const resultsClear = vrEl("vr-results-clear");
   const sourceEl = vrEl("vr-source");
   const textEl = vrEl("vr-text");
+
+  // 检索图片：服务器浏览 / 本机上传 / 清除 / 实时预览。
+  const imagePathEl = vrEl("vr-image-path");
+  const imageFileEl = vrEl("vr-image-file");
+  const imageBrowseBtn = vrEl("vr-image-browse");
+  const imageUploadBtn = vrEl("vr-image-upload");
+  const imageClearBtn = vrEl("vr-image-clear");
+  imagePathEl?.addEventListener("input", vrSyncImageState);
+  imagePathEl?.addEventListener("change", vrSyncImageState);
+  imageBrowseBtn?.addEventListener("click", () => {
+    if (!imagePathEl || !VdFsModal) return;
+    VdFsModal._sourceTarget = imagePathEl;
+    VdFsModal.open("");
+  });
+  imageUploadBtn?.addEventListener("click", () => imageFileEl?.click());
+  imageFileEl?.addEventListener("change", async () => {
+    const f = imageFileEl.files && imageFileEl.files[0];
+    if (!f) return;
+    imageUploadBtn.disabled = true;
+    try {
+      const fd = new FormData();
+      fd.append("file", f);
+      const r = await fetch(API_PREFIX + "/video-retrieval/upload",
+                            { method: "POST", body: fd });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok || !data.path) {
+        throw new Error(data.detail || ("HTTP " + r.status));
+      }
+      if (imagePathEl) {
+        imagePathEl.value = data.path;
+        imagePathEl.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    } catch (e) {
+      vrShowError("图片上传失败: " + (e && e.message ? e.message : e));
+    } finally {
+      imageUploadBtn.disabled = false;
+      imageFileEl.value = "";
+    }
+  });
+  imageClearBtn?.addEventListener("click", () => {
+    if (!imagePathEl) return;
+    imagePathEl.value = "";
+    imagePathEl.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  if (imagePathEl) vrSyncImageState();
 
   const syncSourceMeta = () => {
     const v = (sourceEl?.value || "").trim();
@@ -1687,6 +1784,14 @@ window.ImApp_video_retrieval.applyWizardSnapshot = async function (opts) {
   // 检索问题可选：填了才写入问题框（勾选动作统一放到算力刷新之后）。
   const hasSearch = !!(opts.searchText && String(opts.searchText).trim());
   if (hasSearch) setVal("vr-text", String(opts.searchText));
+  // 检索图片（可选）：向导字段与功能页共用同一控件。
+  if (opts.searchImage != null) {
+    setVal("vr-image-path", String(opts.searchImage || ""));
+    vrSyncImageState();
+  }
+  if (opts.checkImageQuality != null) {
+    setChecked("vr-image-quality", !!opts.checkImageQuality);
+  }
   // 切片参数固化为服务端常量（4s / 重叠 1s），向导不再收集。
   const baseReady = !!opts.source;
   if (!baseReady) {

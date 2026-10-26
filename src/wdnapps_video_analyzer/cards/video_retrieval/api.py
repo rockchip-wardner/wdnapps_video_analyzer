@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import os
 import queue
@@ -306,8 +307,10 @@ async def query_multi(payload: dict) -> dict:
     """
     payload = payload or {}
     text = (payload.get("text") or "").strip()
-    if not text:
-        raise HTTPException(status_code=400, detail="检索问题不能为空")
+    image_path = (payload.get("image_path") or "").strip()
+    check_quality = bool(payload.get("check_image_quality", True))
+    if not text and not image_path:
+        raise HTTPException(status_code=400, detail="请至少填写检索问题或选择一张图片")
     entries = payload.get("entries") or []
     if not isinstance(entries, list) or not entries:
         raise HTTPException(status_code=400, detail="entries 不能为空")
@@ -327,7 +330,6 @@ async def query_multi(payload: dict) -> dict:
         min_results = 0
 
     from app.core.video.cache import get_video_cache
-    from app.core.compute.registry import get_session_call_lock
     c = get_video_cache()
     if c is None:
         raise HTTPException(status_code=409, detail="缓存未启用（cache_enabled=false 或 lancedb 不可用）")
@@ -358,9 +360,20 @@ async def query_multi(payload: dict) -> dict:
     except RuntimeError as e:
         raise HTTPException(status_code=502, detail=str(e)) from e
 
-    lock = get_session_call_lock()
-    with lock:
-        qvec = session.embed_text(text)
+    # 图 / 文 / 图+文：与单视频 query 共用同一个编码入口（锁在
+    # ``encode_query`` 内部，这里不再重复持有）。
+    #
+    # ``encode_query`` 会为「空输入 / 路径不存在 / 格式不对 / 图片纯色 /
+    # 噪声过高 / 文字超长」抛 ValueError。这里必须接住转 400 —— 不接的话
+    # 异常冒泡成 500（非 JSON），前端只能显示 "query_multi 失败 (HTTP 500)"，
+    # 用户看不到「图片几乎是纯色」这类真实原因（与单视频 /query 的
+    # 400 + detail 体验不一致）。
+    try:
+        qvec = get_service().encode_query(text, image_path, check_quality)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
     import numpy as np
     qvec = np.asarray(qvec, dtype=np.float32).reshape(-1)
     qvec = qvec / (float(np.linalg.norm(qvec)) + 1e-9)
@@ -556,11 +569,13 @@ async def stop_extract() -> dict:
 
 @router.post("/query")
 async def query_video(payload: dict) -> dict:
-    """文本检索（匹配阈值固定 0.40、检索上限固定 10）。
+    """检索（文字 / 图片 / 图片+文字）；匹配阈值固定 0.40、上限固定 10。
 
-    Body: ``{text, min_results?, debug?}``。``sim_threshold`` /
-    ``top_k`` 即使传入也会被忽略（改参数请改 ``app/core/video/search.py``
-    的 ``FIXED_SIM_THRESHOLD`` / ``FIXED_TOP_K``）。
+    Body: ``{text?, image_path?, check_image_quality?, min_results?, debug?}``。
+    ``text`` 与 ``image_path`` 至少一个；两者同时给 = 图+文组合查询。
+    ``check_image_quality`` 默认 ``True``（拒绝纯色/随机噪声图）。
+    ``sim_threshold`` / ``top_k`` 即使传入也会被忽略（改参数请改
+    ``app/core/video/search.py`` 的 ``FIXED_SIM_THRESHOLD`` / ``FIXED_TOP_K``）。
 
     固定阈值严格过滤相似度，返回的每条 hit 都满足
     ``similarity >= 0.40``。当 **没有任何** hit 达到阈值，
@@ -570,6 +585,8 @@ async def query_video(payload: dict) -> dict:
     """
     payload = payload or {}
     text = (payload.get("text") or "").strip()
+    image_path = (payload.get("image_path") or "").strip()
+    check_quality = bool(payload.get("check_image_quality", True))
     debug = bool(payload.get("debug", False))
     try:
         # 阈值 / 上限固化：忽略 body 传入值，改参数请改模块常量。
@@ -581,14 +598,17 @@ async def query_video(payload: dict) -> dict:
         min_results = int(payload.get("min_results", 0))
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="min_results 必须为数值")
-    # embed_text 是同步 NPU 推理：挪到线程池执行（不阻塞 event loop），
+    # embed_* 是同步 NPU 推理：挪到线程池执行（不阻塞 event loop），
     # 并加 35s 超时兜底 —— SDK 卡死时前端不会无限 pending（对齐 VFA 做法）。
     loop = asyncio.get_event_loop()
+    call = functools.partial(
+        get_service().query,
+        text, sim_threshold, top_k, min_results, debug,
+        image_path=image_path, check_image_quality=check_quality,
+    )
     try:
         return await asyncio.wait_for(
-            loop.run_in_executor(
-                None, get_service().query,
-                text, sim_threshold, top_k, min_results, debug),
+            loop.run_in_executor(None, call),
             timeout=35.0,
         )
     except asyncio.TimeoutError:
@@ -760,6 +780,21 @@ async def vr_play_ws(ws: WebSocket) -> None:
         stop_event.set()
         if thread is not None and thread.is_alive():
             thread.join(timeout=2.0)
+
+
+@router.get("/image/thumb")
+async def get_image_thumb(path: str = "") -> Response:
+    """查询图缩略图（只读；功能页/向导回显选中的图片）。
+
+    与检索图走同一套路径校验（绝对路径、格式、大小上限），只返回
+    长边 240 的 JPEG，不触发 NPU。
+    """
+    from app.core.video.search import read_image_thumb
+    try:
+        data = read_image_thumb(path)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return Response(content=data, media_type="image/jpeg")
 
 
 @router.get("/frame")
