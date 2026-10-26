@@ -3,8 +3,8 @@
 由卡片 ``__init__.py`` 挂载到 ``/api/video-retrieval/*``（扁平，无 /search 子前缀）。
 业务逻辑在 ``app.core.video.search``（遵守卡片零跨卡片 import 规则）。
 字段名（``chunk_seconds`` / ``start_time`` 等）与前端契约保持不变；切片
-时长 / 重叠 / 匹配阈值 / 检索上限固化为服务端常量（见
-``app/core/video/search.py`` 的 ``FIXED_*``），页面与向导不暴露。
+口径由 gscore 判据 + ``app/core/video/slicing.py`` 的 ``SLICE_*`` 常量
+决定，匹配阈值 / 检索上限固化在 ``app/core/video/search.py``。
 """
 from __future__ import annotations
 
@@ -20,10 +20,19 @@ from typing import Optional
 from fastapi import (APIRouter, File, HTTPException, UploadFile, WebSocket,
                     WebSocketDisconnect)
 from fastapi.responses import Response
+from pydantic import BaseModel, Field
 
 from app.core.config import default_resource_root
+from app.core.video.frame_judge import (
+    DEFAULT_LONG_SIDE,
+    MODE_MANUAL,
+    cost_ms,
+    default_threshold,
+    metrics,
+)
 from app.core.video.session import get_session
 from app.core.video.search import (
+    DEFAULT_JUDGE_EVERY_N,
     FIXED_SIM_THRESHOLD,
     FIXED_TOP_K,
     get_service,
@@ -246,20 +255,25 @@ async def list_cache_entries() -> dict:
 
 @router.delete("/cache/entry")
 async def delete_cache_entry(payload: dict) -> dict:
-    """按行（md5 × 切片参数三元键）删除单个缓存条目。
+    """按行（md5 × 切片参数 × 判据口径）删除单个缓存条目。
 
-    Body: ``{md5, chunk_seconds, chunk_overlap_seconds}``。同视频
-    其它切片参数档的索引保留。
+    Body: ``{md5, chunk_seconds, chunk_overlap_seconds, judge_fp?,
+    slice_version?}``。同视频其它切片参数 / 判据档的索引保留；旧前端
+    不传判据字段时按 ``None``（不过滤）处理，保持向后兼容。
     """
     payload = payload or {}
     md5 = (payload.get("md5") or "").strip()
     chunk_seconds = int(payload.get("chunk_seconds") or 0)
     chunk_overlap_seconds = int(payload.get("chunk_overlap_seconds") or 0)
+    judge_fp = payload.get("judge_fp")
+    slice_version = payload.get("slice_version")
     if not md5:
         raise HTTPException(status_code=400, detail="md5 不能为空")
     from app.core.video.cache import get_video_cache
     c = get_video_cache()
-    deleted = c.delete_video(md5, chunk_seconds, chunk_overlap_seconds) \
+    deleted = c.delete_video(
+        md5, chunk_seconds, chunk_overlap_seconds,
+        judge_fp=judge_fp, slice_version=slice_version) \
         if c is not None else 0
     LOG.info("vr API: DELETE /cache/entry md5=%s chunk=%s → %d rows",
              md5[:12], chunk_seconds, deleted)
@@ -326,11 +340,14 @@ async def query_multi(payload: dict) -> dict:
         md5 = (e.get("md5") or "").strip()
         cs = int(e.get("chunk_seconds") or 0)
         ov = int(e.get("chunk_overlap_seconds") or 0)
-        key = (md5, cs, ov)
+        jfp = e.get("judge_fp")
+        sver = e.get("slice_version")
+        key = (md5, cs, ov, jfp, sver)
         if md5 and key not in seen:
             seen.add(key)
             clean.append({"md5": md5, "chunk_seconds": cs,
-                          "chunk_overlap_seconds": ov})
+                          "chunk_overlap_seconds": ov,
+                          "judge_fp": jfp, "slice_version": sver})
     if not clean:
         raise HTTPException(status_code=400, detail="entries 里的 md5 均为空")
 
@@ -362,7 +379,9 @@ async def query_multi(payload: dict) -> dict:
             cached = c.lookup(e["md5"],
                               getattr(session, "model_id", None)
                               or getattr(session, "_model_id", "") or "",
-                              e["chunk_seconds"], e["chunk_overlap_seconds"])
+                              e["chunk_seconds"], e["chunk_overlap_seconds"],
+                              judge_fp=e["judge_fp"],
+                              slice_version=e["slice_version"])
         except Exception as exc:  # noqa: BLE001
             LOG.warning("vr query_multi: lookup %s failed: %s",
                         e["md5"][:12], exc)
@@ -386,6 +405,10 @@ async def query_multi(payload: dict) -> dict:
             "frame_enabled": bool(source_path) and os.path.isfile(source_path),
             "chunk_seconds": e["chunk_seconds"],
             "chunk_overlap_seconds": e["chunk_overlap_seconds"],
+            "judge_fp": cached.get("judge_fp")
+                        or (e["judge_fp"] if e["judge_fp"] is not None else ""),
+            "slice_version": cached.get("slice_version")
+                        or (e["slice_version"] if e["slice_version"] is not None else ""),
             "duration_s": cached.get("duration_s") or 0.0,
             "slices": len(cached["index"]),
             "hits": hits_,
@@ -450,6 +473,61 @@ async def open_source(payload: dict) -> dict:
     if not source:
         raise HTTPException(status_code=400, detail="source 不能为空")
     return get_service().open(source)
+
+
+class JudgePayload(BaseModel):
+    """``POST /judge`` 的请求体。
+
+    **必须定义在模块级**：``from __future__ import annotations`` 让端点签名
+    变成字符串，FastAPI 解析时只查模块 globals。字段缺失 = 沿用当前值
+    （与三卡判据端点同契约）。
+    """
+    mode: Optional[str] = None
+    every_n: Optional[int] = Field(default=None, ge=1, le=3600)
+    threshold: Optional[float] = Field(default=None, gt=0, le=1000)
+
+
+@router.get("/judge/metrics")
+async def get_judge_metrics() -> dict:
+    """下拉可选项 + 实测单帧成本 + 各算法默认阈值。
+
+    字段与 ``/api/video/judge/metrics`` 逐字一致 —— 共享前端组件
+    ``frame-judge.js`` 读的就是这套结构。额外给 ``default_every_n``
+    （VR 的兜底间隔是秒级采样口径，与三卡的「解码帧」不同）。
+    """
+    ms = metrics()
+    return {
+        "mode": MODE_MANUAL,
+        "metrics": ms,
+        "cost_ms": {m: round(cost_ms(m) or 0.0, 2) for m in ms},
+        "default_threshold": {m: default_threshold(m) for m in ms},
+        "long_side": DEFAULT_LONG_SIDE,
+        "default_every_n": DEFAULT_JUDGE_EVERY_N,
+    }
+
+
+@router.get("/judge")
+async def get_judge() -> dict:
+    return get_service().judge_snapshot()
+
+
+@router.post("/judge")
+async def set_judge(payload: JudgePayload) -> dict:
+    """配置判据（真节流）：改完立刻对后续采样生效。
+
+    ``model_dump(exclude_unset=True)`` 保证「字段缺失 = 沿用当前值」；
+    显式 ``mode=""`` 也视为沿用（与三卡端点同语义）。
+    """
+    data = payload.model_dump(exclude_unset=True)
+    if isinstance(data.get("mode"), str) and not data["mode"].strip():
+        data.pop("mode", None)
+    return get_service().set_judge(data)
+
+
+@router.post("/judge/reset")
+async def reset_judge() -> dict:
+    """清空判据参照帧（不动配置）。"""
+    return get_service().reset_judge()
 
 
 @router.post("/extract")

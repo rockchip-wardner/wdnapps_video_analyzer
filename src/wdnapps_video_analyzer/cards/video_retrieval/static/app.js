@@ -100,6 +100,10 @@ function vrApplySnapshot(snap) {
   if (!snap) return;
   VR.snap = snap;
   vrRenderSnapshot(snap);
+  // 判据快照（VR 单实例）：回填判据控件。后端在 start / 完成时推 state。
+  if (snap.judge && window.FrameJudge) {
+    window.FrameJudge.update("vr", snap.judge);
+  }
   // 提取完成（首次现有条目入库）后刷新缓存窗口 —— 让新条目立即可勾选；
   // 同时清空视频源路径文本框（仅成功清空，error/stopped 保留便于重试），
   // 引导后续检索走"已缓存视频"勾选路径。
@@ -138,20 +142,27 @@ function vrApplySnapshot(snap) {
   if (VR._progressForceIdle) {
     if (prog) prog.hidden = true;
     if (fill) fill.style.width = "0%";
-    if (label) label.textContent = "检索: 已嵌入 0/0 切片";
+    if (label) label.textContent = "检索: 待提取";
     if (pct) pct.textContent = "0%";
   } else if (st === "extracting") {
     if (prog) prog.hidden = false;
-    const total = snap.slices_total || 0;
-    const emb = snap.slices_embedded || 0;
-    const p = total > 0 ? Math.round((emb / total) * 100) : 0;
+    // gscore 切片下片段总数是动态的（跳过的秒不产片段），进度改用
+    // 「已分析秒数 / 总时长」——它单调、可预期，且不随判据阈值跳动。
+    const dur = Number(snap.duration_s) || 0;
+    const evalN = Number(snap.frames_evaluated) || 0;
+    const emb = Number(snap.slices_embedded) || 0;
+    // 采样帧是 1 秒/帧，总数是 ceil(时长)；用 duration_s 直接做分母
+    // 会让尾部采样（如 9.23s 的第 10 帧）提前顶到 100%。
+    const totalSec = Math.max(1, Math.ceil(dur));
+    const p = dur > 0 ? Math.round(Math.min(1, evalN / totalSec) * 100) : 0;
     if (fill) fill.style.width = p + "%";
-    if (label) label.textContent = `检索: 已嵌入 ${emb}/${total} 切片`;
+    if (label) label.textContent =
+      `检索: 已提取 ${emb} 段 · 已分析 ${evalN}/${Math.round(dur)} 秒`;
     if (pct) pct.textContent = p + "%";
   } else if (st === "ready") {
     if (prog) prog.hidden = false;
     if (fill) fill.style.width = "100%";
-    if (label) label.textContent = `检索: 已嵌入 ${snap.slices_total || 0}/${snap.slices_total || 0} 切片`;
+    if (label) label.textContent = `检索: 已提取 ${snap.slices_total || 0} 段`;
     if (pct) pct.textContent = "100%";
   } else {
     if (prog) prog.hidden = true;
@@ -301,6 +312,8 @@ function vrCheckedEntries() {
       md5: cb.dataset.md5,
       chunk_seconds: Number(cb.dataset.chunk) || 0,
       chunk_overlap_seconds: Number(cb.dataset.overlap) || 0,
+      judge_fp: cb.dataset.judgeFp || "",
+      slice_version: cb.dataset.sliceVersion || "",
     });
   });
   return out;
@@ -341,7 +354,8 @@ async function vrCacheRefresh() {
   const alive = new Set();
   (items || []).forEach((it) => (it.retrieval || []).forEach((rt) => {
     alive.add(it.md5 + "|" + (rt.chunk_seconds || 0) + "|"
-              + (rt.chunk_overlap_seconds || 0));
+              + (rt.chunk_overlap_seconds || 0) + "|"
+              + (rt.judge_fp || "") + "|" + (rt.slice_version || ""));
   }));
   Array.from(VR.cacheSel).forEach((k) => {
     if (!alive.has(k)) VR.cacheSel.delete(k);
@@ -398,6 +412,8 @@ function vrCacheRender(items, enabled, failed) {
             md5,
             chunk_seconds: Number(btn.dataset.chunk) || 0,
             chunk_overlap_seconds: Number(btn.dataset.overlap) || 0,
+            judge_fp: btn.dataset.judgeFp || "",
+            slice_version: btn.dataset.sliceVersion || "",
           }),
         });
         if (r.ok) await vrCacheRefresh();
@@ -408,25 +424,30 @@ function vrCacheRender(items, enabled, failed) {
 
 // 一行 = 一条检索缓存（md5 × 切片参数）。
 function vrCacheRowHtml(it, rt) {
+  const jfp = rt.judge_fp || "";
+  const sver = rt.slice_version || "";
   const key = it.md5 + "|" + (rt.chunk_seconds || 0) + "|"
-            + (rt.chunk_overlap_seconds || 0);
+            + (rt.chunk_overlap_seconds || 0) + "|" + jfp + "|" + sver;
   const checked = VR.cacheSel.has(key) ? " checked" : "";
+  // 第二行只保留「N 段 · 时间」。切片口径（按变化切片 / 4s·1s）不展示：
+  // 它由判据配置决定、也不描述实际片段，在窄侧栏里只会把文件名挤到看
+  // 不见（用户实测）。判据 / 版本仍保留在 dataset / key 里供检索与删除。
   const meta = [
-    `${rt.chunk_seconds || "?"}s/${rt.chunk_overlap_seconds || "?"}s`,
     `${rt.slices || 0} 段`,
     vrFmtTs(rt.analyzed_at || it.updated_at),
   ].filter(Boolean).join(" · ");
+  const ds = ` data-md5="${vrEsc(it.md5)}" data-chunk="${rt.chunk_seconds || 0}"` +
+    ` data-overlap="${rt.chunk_overlap_seconds || 0}"` +
+    ` data-judge-fp="${vrEsc(jfp)}" data-slice-version="${vrEsc(sver)}"`;
   return (
     `<label class="vr-cache-row" data-key="${vrEsc(key)}"` +
       ` title="${vrEsc(it.source_path || "")}">` +
       `<input type="checkbox" class="vr-cache-check" data-key="${vrEsc(key)}"` +
-        ` data-md5="${vrEsc(it.md5)}" data-chunk="${rt.chunk_seconds || 0}"` +
-        ` data-overlap="${rt.chunk_overlap_seconds || 0}"${checked} />` +
+        ds + checked + ` />` +
       `<span class="vr-cache-name">${vrEsc(vrBaseName(it.filename))}</span>` +
       `<span class="vr-cache-meta">${vrEsc(meta)}</span>` +
       `<button class="vr-cache-del" type="button" data-key="${vrEsc(key)}"` +
-        ` data-md5="${vrEsc(it.md5)}" data-chunk="${rt.chunk_seconds || 0}"` +
-        ` data-overlap="${rt.chunk_overlap_seconds || 0}">删除</button>` +
+        ds + `>删除</button>` +
     "</label>"
   );
 }
@@ -496,6 +517,8 @@ async function vrQueryMulti(text, minResults) {
       md5: cb.dataset.md5,
       chunk_seconds: Number(cb.dataset.chunk) || 0,
       chunk_overlap_seconds: Number(cb.dataset.overlap) || 0,
+      judge_fp: cb.dataset.judgeFp || "",
+      slice_version: cb.dataset.sliceVersion || "",
     });
   });
   if (!entries.length) {
@@ -557,7 +580,9 @@ function vrRenderMultiGroups(groups, text) {
         )}：缓存索引不可读（可能已被删除或清空）</li>`;
       return;
     }
-    const params = `${g.chunk_seconds || "?"}s/${g.chunk_overlap_seconds || "?"}s`;
+    const params = (g.slice_version === "gscore-v1")
+      ? "按变化切片"
+      : `${g.chunk_seconds || "?"}s/${g.chunk_overlap_seconds || "?"}s`;
     const frameTag = g.frame_enabled ? "可取帧回看" : "（无本地文件，仅时间段）";
     html += `<li class="vr-group-head">${vrEsc(g.filename || "(未命名)")}` +
       `<span class="vr-g-meta">${vrEsc(params)}` +
@@ -1176,6 +1201,11 @@ function connectVrWs() {
       snap.state = "extracting";
       snap.slices_embedded = msg.embedded;
       snap.slices_total = msg.total;
+      // progress 帧带当前采样进度（1Hz）。**必须合进快照**，否则
+      // vrApplySnapshot 读到的是提取开始那一刻的 frames_evaluated=0，
+      // 「已分析 X/Y 秒」和进度条全程不动、完成时才跳到 100%（实测）。
+      if (msg.frames_evaluated != null) snap.frames_evaluated = msg.frames_evaluated;
+      if (msg.duration_s != null) snap.duration_s = msg.duration_s;
       vrApplySnapshot(snap);
     } else if (msg.type === "error") {
       vrShowError(msg.detail || "WS 错误");
@@ -1406,6 +1436,17 @@ function initVideoRetrievalCore() {
   });
   startBtn?.addEventListener("click", vrStart);
   stopBtn?.addEventListener("click", vrStop);
+
+  // 判据配置（gscore 真节流）：VR 没有持续解码画面，只要配置区，
+  // 不建浮框 / 曲线。端点挂本卡（/api/video-retrieval/judge*）。
+  if (window.FrameJudge) {
+    window.FrameJudge.mount({
+      prefix: "vr",
+      apiBase: API_PREFIX + "/video-retrieval",
+      configOnly: true,
+      defaultEveryN: 10,
+    });
+  }
 
   // 向导模式 / 手动预览 — 复用 vd 单例 VideoSession 跑连续预览帧流。
   // 与 vd / vtd / vtl 的「播放视频 / 关闭」按钮行为一致:open 把 source/loop
@@ -1651,6 +1692,22 @@ window.ImApp_video_retrieval.applyWizardSnapshot = async function (opts) {
   if (!baseReady) {
     return { source_set: !!opts.source, source_opened: false,
              search_set: hasSearch, started: false };
+  }
+
+  // 判据字段（source 步）→ 直接落到后端。必须在 start_extract 之前，
+  // 因为提取开始时服务端会按当前判据配置切片。
+  if (window.FrameJudge) {
+    const judgeCfg = {};
+    if (opts.judgeMode) judgeCfg.mode = String(opts.judgeMode);
+    if (opts.judgeThreshold != null && opts.judgeThreshold !== "") {
+      judgeCfg.threshold = Number(opts.judgeThreshold);
+    }
+    if (opts.judgeEveryN != null && opts.judgeEveryN !== "") {
+      judgeCfg.every_n = Number(opts.judgeEveryN);
+    }
+    if (Object.keys(judgeCfg).length) {
+      await window.FrameJudge.applyConfig("vr", judgeCfg);
+    }
   }
 
   // 打开视频源 → 画面在播（与 vtd / vtl / vd 一致：向导跑完就有画面）。

@@ -36,6 +36,44 @@
           "label": "循环播放",
           "type": "checkbox",
           "default": true
+        },
+        {
+          "id": "vr-judge-mode",
+          "ui_key": "judgeMode",
+          "label": "判帧算法（决定哪些秒送去切片）",
+          "type": "select",
+          "options": [
+            {
+              "value": "manual",
+              "label": "手动间隔（按固定间隔取帧，不比对画面）"
+            },
+            {
+              "value": "gscore",
+              "label": "gscore 画面变化（推荐：静止画面不重复切片）",
+              "selected": true
+            }
+          ]
+        },
+        {
+          "id": "vr-judge-threshold",
+          "ui_key": "judgeThreshold",
+          "label": "变化阈值（越小越敏感）",
+          "type": "number",
+          "default": 10,
+          "min": "0.1",
+          "step": "0.1",
+          "placeholder": "默认 10（刻度按算法不同，切换算法会换成该算法的默认值）"
+        },
+        {
+          "id": "vr-judge-every-n",
+          "ui_key": "judgeEveryN",
+          "label": "帧间隔（有变化时的最长间隔）",
+          "type": "number",
+          "default": 10,
+          "min": "1",
+          "max": "3600",
+          "step": "1",
+          "placeholder": "默认 10（无变化时，最多会隔 10 秒再取一帧）"
         }
       ]
     },
