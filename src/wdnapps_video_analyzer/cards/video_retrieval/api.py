@@ -276,9 +276,20 @@ async def delete_cache_entry(payload: dict) -> dict:
         md5, chunk_seconds, chunk_overlap_seconds,
         judge_fp=judge_fp, slice_version=slice_version) \
         if c is not None else 0
-    LOG.info("vr API: DELETE /cache/entry md5=%s chunk=%s → %d rows",
-             md5[:12], chunk_seconds, deleted)
-    return {"ok": True, "rows_deleted": deleted}
+    # 与 /cache/clear 保持一致：如果删的是当前会话对应的缓存条目，必须
+    # 作废内存索引 / 状态 —— 否则持久缓存已删、单例仍是 ready + 旧 _index，
+    # 前端「开始 / 向导完成」会走 ready+同源短路，只查旧索引：进度条直接
+    # 100%、检索有结果，但不会重新提取、也就不生成新的缓存条目（用户实测）。
+    service = get_service()
+    session_reset = False
+    if getattr(service, "_md5", "") == md5:
+        service.reset_session()
+        session_reset = True
+    LOG.info("vr API: DELETE /cache/entry md5=%s chunk=%s → %d rows "
+             "(session_reset=%s)",
+             md5[:12], chunk_seconds, deleted, session_reset)
+    return {"ok": True, "rows_deleted": deleted,
+            "session_reset": session_reset}
 
 
 @router.post("/query_multi")

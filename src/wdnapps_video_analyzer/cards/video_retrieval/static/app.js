@@ -449,7 +449,20 @@ function vrCacheRender(items, enabled, failed) {
             slice_version: btn.dataset.sliceVersion || "",
           }),
         });
-        if (r.ok) await vrCacheRefresh();
+        const data = await r.json().catch(() => ({}));
+        if (r.ok) {
+          if (data.session_reset) {
+            // 删的是当前会话条目：后端已作废内存索引，前端也要清掉
+            // ready 快照 / 进度 / 旧结果，否则下一次“开始 / 向导完成”
+            // 会走 ready+同源短路，只查旧索引且不写新缓存。
+            VR.snap = null;
+            VR._cacheWinOnReady = null;
+            VR.pendingQuery = false;
+            vrResetProgress();
+            vrRenderHits([], null);
+          }
+          await vrCacheRefresh();
+        }
       } catch (_) {}
     });
   });
@@ -1345,7 +1358,9 @@ function vrReport() {
 }
 
 // 「开始」：只走检索（缓存勾选优先，否则先提取再检索）。
-async function vrStart() {
+// forceExtract=true 用于向导完成：强制走一次 start_extract（缓存命中秒回，
+// 缓存已删则重新提取并写缓存），避免前端残留 ready 快照导致短路。
+async function vrStart(forceExtract = false) {
   // 新一轮任务：允许 ready 快照再次触发"路径已清空"（防抖只用于同轮去重）。
   VR._cacheWinOnReady = null;
   const src = (vrEl("vr-source")?.value || "").trim();
@@ -1365,18 +1380,19 @@ async function vrStart() {
     vrShowError("请填写检索问题，或选择一张检索图片"); return;
   }
   vrShowError("");
-  await vrStartSearch(src, anyChecked);
+  await vrStartSearch(src, anyChecked, forceExtract);
   vrUpdateButtons();
 }
 
 // 「检索」分支：勾选缓存 → 直接多视频检索；索引已就绪且源未变 → 只重检索；
 // 否则先提取，提取完成（ready）后自动检索一次（见 vrApplySnapshot）。
-async function vrStartSearch(src, anyChecked) {
+async function vrStartSearch(src, anyChecked, forceExtract = false) {
   if (anyChecked) { await vrQuery(); return; }
   const st = (VR.snap && VR.snap.state) || "idle";
   // _progressForceIdle：刚清空检索结果 / 清空缓存，即使有旧 ready 快照被
   // WS 刷回也不能短路跳过提取（该标志在下次 extracting 时自动清除）。
-  if (st === "ready" && !VR._progressForceIdle
+  // forceExtract：向导完成时强制重新走 start_extract（缓存命中秒回）。
+  if (!forceExtract && st === "ready" && !VR._progressForceIdle
       && VR.snap && VR.snap.source === src) {
     await vrQuery();
     vrClearSourceAfterReady();
@@ -1531,7 +1547,9 @@ function initVideoRetrievalCore() {
     VdFsModal._sourceTarget = sourceEl;
     VdFsModal.open("");
   });
-  startBtn?.addEventListener("click", vrStart);
+  // 注意不要直接把 vrStart 当 handler：click 事件对象会作为第一个参数
+  // 传进 forceExtract（truthy）→ 手动开始也会强制重新提取。
+  startBtn?.addEventListener("click", () => vrStart());
   stopBtn?.addEventListener("click", vrStop);
 
   // 判据配置（gscore 真节流）：VR 没有持续解码画面，只要配置区，
@@ -1836,6 +1854,14 @@ window.ImApp_video_retrieval.applyWizardSnapshot = async function (opts) {
     console.warn("[vr-wizard] 视频源预览没起来（检索不受影响）:", opts.source);
   }
 
+  // 向导是新一轮任务：清掉上一轮 ready 快照，并强制走一次 start_extract。
+  // 缓存命中会秒级 restore（不重复 embedding）；缓存已被删除则重新提取
+  // 并生成缓存。否则前端残留的 ready+同源短路会让进度条直接 100%、
+  // 只查旧内存索引而不写缓存（用户实测）。
+  VR.snap = null;
+  VR._cacheWinOnReady = null;
+  VR.pendingQuery = false;
+
   // 勾选前先主动刷新一次算力可用性。向导在 _waitForModelsRunning 之后
   // 立即回调，而前端 modeAvail 走 5s 周期，此刻可能仍是"未启用"旧值。
   //
@@ -1849,7 +1875,7 @@ window.ImApp_video_retrieval.applyWizardSnapshot = async function (opts) {
     probe: vrCapabilitySnapshot,
     isReady: (s) => !!(s && s.available !== false),
     isStarted: (s) => !(s && s.error),
-    start: () => vrStart(),
+    start: () => vrStart(true),
   });
   return { source_set: true, source_opened: sourceOpened,
            search_set: hasSearch, started: true };
