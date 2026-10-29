@@ -948,6 +948,8 @@ function vrClosePlayWs(settle) {
 // ------------------------------------------------------------------ *
 async function vrOpenPreview(source, loop) {
   if (!source) { vrShowError("请先选择视频源"); return false; }
+  // 新源 = 新一轮采样，丢掉上一段视频/上一次向导留下的曲线点。
+  try { window.FrameJudge?.clear("vr"); } catch (_) { /* ignore */ }
   vrClosePlayWs(false);                 // 抢占 canvas:先关掉可能存在的检索播放
   await vrClosePreviewWs();             // 重新打开前确保上一路 preview WS 已关
   try {
@@ -1012,6 +1014,12 @@ function vrConnectPreviewWs() {
         let msg;
         try { msg = JSON.parse(ev.data); } catch (_) { return; }
         if (msg.type === "eof" || msg.type === "status") {
+          // 提取阶段由 /video-retrieval 的 progress/state 提供 search
+          // judge 分数；不要让仍在播放的预览 judge 与它交替刷新曲线。
+          if (msg.judge && window.FrameJudge
+              && (!VR.snap || VR.snap.state !== "extracting")) {
+            window.FrameJudge.update("vr", msg.judge);
+          }
           if (VR._vrSourceStatus) VR._vrSourceStatus(msg);
         }
         return;
@@ -1552,18 +1560,22 @@ function initVideoRetrievalCore() {
   startBtn?.addEventListener("click", () => vrStart());
   stopBtn?.addEventListener("click", vrStop);
 
-  // 判据配置（gscore 真节流）：VR 没有持续解码画面，只要配置区，
-  // 不建浮框 / 曲线。端点挂本卡（/api/video-retrieval/judge*）。
+  // 判据配置 + 向导曲线：VR 的视频源预览也走共享 VideoSession，
+  // 其解码线程会在向导模式持续打分；source/ws 的 status 帧把 judge
+  // 带回这里，曲线因此和 VD 一样在“视频开始播放”后工作。
   if (window.FrameJudge) {
     window.FrameJudge.mount({
       prefix: "vr",
+      canvasId: "vr-canvas",
       // 必须带 /judge:frame-judge 会 fetch `<apiBase>/metrics` 与
       // `<apiBase>`(GET/POST 判据配置),本卡的判据端点挂在
       // /api/video-retrieval/judge* 下。漏掉 /judge → 拉不到指标
       // (下拉空) 且每次进页面刷一条 404。
       apiBase: API_PREFIX + "/video-retrieval/judge",
-      configOnly: true,
       defaultEveryN: 10,
+      singleCanvas: true,
+      curveVisible: false,
+      curveOnCanvasClick: true,
     });
   }
 
@@ -1781,6 +1793,11 @@ function _wizardStart(opts) {
   }
   return ws.run(opts);
 }
+
+window.addEventListener("wizard:unmounted", (ev) => {
+  if (!ev || !ev.detail || ev.detail.appId !== "video-retrieval") return;
+  try { window.FrameJudge?.clear("vr"); } catch (_) { /* ignore */ }
+});
 
 window.ImApp_video_retrieval = window.ImApp_video_retrieval || {};
 window.ImApp_video_retrieval.applyWizardSnapshot = async function (opts) {

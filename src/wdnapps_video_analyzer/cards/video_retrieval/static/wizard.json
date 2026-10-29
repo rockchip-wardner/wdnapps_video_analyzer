@@ -96,6 +96,8 @@
           "type": "text",
           "browse": true,
           "upload": true,
+          "image_preview": true,
+          "thumbnail_endpoint": "/api/video-retrieval/image/thumb",
           "placeholder": "选择或上传一张图片；留空则只用文字检索"
         },
         {

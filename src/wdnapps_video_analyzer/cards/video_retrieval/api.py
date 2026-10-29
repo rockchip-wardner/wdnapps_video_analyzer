@@ -535,6 +535,24 @@ async def get_judge() -> dict:
     return get_service().judge_snapshot()
 
 
+def _sync_preview_judge(data: dict) -> None:
+    """Apply the same judge settings to the shared preview session.
+
+    VR's wizard preview runs on the shared ``VideoSession`` while slicing
+    uses ``VideoSearchService._judge``. The curve reads the preview judge
+    first, so a POST that only updated the search service would make the
+    source-step curve disagree with the controls.
+    """
+    try:
+        get_session().configure_judge(
+            mode=data.get("mode"),
+            every_n=data.get("every_n"),
+            threshold=data.get("threshold"),
+        )
+    except Exception as exc:  # noqa: BLE001 — preview may be closed
+        LOG.debug("video-retrieval: preview judge sync failed: %s", exc)
+
+
 @router.post("/judge")
 async def set_judge(payload: JudgePayload) -> dict:
     """配置判据（真节流）：改完立刻对后续采样生效。
@@ -545,13 +563,20 @@ async def set_judge(payload: JudgePayload) -> dict:
     data = payload.model_dump(exclude_unset=True)
     if isinstance(data.get("mode"), str) and not data["mode"].strip():
         data.pop("mode", None)
-    return get_service().set_judge(data)
+    result = get_service().set_judge(data)
+    _sync_preview_judge(data)
+    return result
 
 
 @router.post("/judge/reset")
 async def reset_judge() -> dict:
-    """清空判据参照帧（不动配置）。"""
-    return get_service().reset_judge()
+    """清空切片与预览判据的参照帧（不动配置）。"""
+    result = get_service().reset_judge()
+    try:
+        get_session().reset_judge()
+    except Exception as exc:  # noqa: BLE001
+        LOG.debug("video-retrieval: preview judge reset failed: %s", exc)
+    return result
 
 
 @router.post("/extract")
