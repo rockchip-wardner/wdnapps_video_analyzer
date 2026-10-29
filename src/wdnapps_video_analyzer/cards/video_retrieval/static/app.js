@@ -1557,7 +1557,11 @@ function initVideoRetrievalCore() {
   if (window.FrameJudge) {
     window.FrameJudge.mount({
       prefix: "vr",
-      apiBase: API_PREFIX + "/video-retrieval",
+      // 必须带 /judge:frame-judge 会 fetch `<apiBase>/metrics` 与
+      // `<apiBase>`(GET/POST 判据配置),本卡的判据端点挂在
+      // /api/video-retrieval/judge* 下。漏掉 /judge → 拉不到指标
+      // (下拉空) 且每次进页面刷一条 404。
+      apiBase: API_PREFIX + "/video-retrieval/judge",
       configOnly: true,
       defaultEveryN: 10,
     });
