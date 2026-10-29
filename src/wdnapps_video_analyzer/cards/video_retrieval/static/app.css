@@ -42,3 +42,12 @@
   background: #000;
   object-fit: contain;
 }
+
+/* 向导里 VR 的 canvas 是裸元素（其它视频卡搬的是自带 aspect-ratio 的
+   .vd-stage 宫格）。固定 16:9，避免沿用功能页/上一次的像素高度，播放时
+   窗口越变越大。 */
+.wd-wizard-canvas-wrap > #vr-canvas {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 16 / 9;
+}

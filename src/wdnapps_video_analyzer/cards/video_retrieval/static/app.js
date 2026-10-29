@@ -1140,8 +1140,15 @@ async function vrStopPreview() {
 function vrSyncCanvasSize() {
   const canvas = vrEl("vr-canvas");
   if (!canvas || !canvas.parentElement) return;
-  const w = Math.max(2, Math.floor(canvas.parentElement.clientWidth));
-  const h = Math.max(2, Math.floor(canvas.parentElement.clientHeight));
+  const parent = canvas.parentElement;
+  const w = Math.max(2, Math.floor(parent.clientWidth));
+  // 功能页的 .vd-stage 本身是 16:9；向导里的 .wd-wizard-canvas-wrap
+  // 没有固定比例，不能拿它的 clientHeight 当画布高度，否则会把上一次
+  // 的像素尺寸带进来、越播越大。向导内统一按 16:9 计算。
+  const inWizard = !!canvas.closest(".wd-wizard-canvas-wrap");
+  const h = inWizard
+    ? Math.max(2, Math.round(w * 9 / 16))
+    : Math.max(2, Math.floor(parent.clientHeight));
   if (canvas.width !== w || canvas.height !== h) {
     canvas.width = w;
     canvas.height = h;
@@ -1820,14 +1827,13 @@ window.ImApp_video_retrieval.applyWizardSnapshot = async function (opts) {
 
   if (opts.source) setVal("vr-source", opts.source);
   if (opts.loop != null) setChecked("vr-loop", !!opts.loop);
-  // 检索问题可选：填了才写入问题框（勾选动作统一放到算力刷新之后）。
+  // 检索问题 / 图片：必须**无条件**与本次向导对齐。只在有值时写入会让
+  // 上一轮图片（或文字）残留在功能页，第二轮纯文字检索仍带着旧图。
   const hasSearch = !!(opts.searchText && String(opts.searchText).trim());
-  if (hasSearch) setVal("vr-text", String(opts.searchText));
-  // 检索图片（可选）：向导字段与功能页共用同一控件。
-  if (opts.searchImage != null) {
-    setVal("vr-image-path", String(opts.searchImage || ""));
-    vrSyncImageState();
-  }
+  setVal("vr-text", hasSearch ? String(opts.searchText) : "");
+  setVal("vr-image-path",
+         opts.searchImage != null ? String(opts.searchImage || "") : "");
+  vrSyncImageState();
   if (opts.checkImageQuality != null) {
     setChecked("vr-image-quality", !!opts.checkImageQuality);
   }

@@ -1,6 +1,7 @@
 {
   "enabled": true,
   "wizard_title": "监控反查快速配置",
+  "force_reset_fields": ["vr-search-image", "vr-text"],
   "swcap_to_model": {
     "swcap_vision_embedding": {
       "npu_index": 1,
