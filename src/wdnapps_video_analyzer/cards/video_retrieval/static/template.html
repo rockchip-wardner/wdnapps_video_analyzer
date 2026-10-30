@@ -67,27 +67,7 @@
                   <span class="surv-hint">提供文字 + 图片或其中之一进行反查</span>
                 </header>
                 <div class="surv-field">
-                  <div class="vr-ta-wrap">
-                    <textarea id="vr-text" class="surv-input surv-textarea" maxlength="50"
-                              placeholder="例如：有人在搬箱子 / 货车驶入 / 穿红色衣服的人"></textarea>
-                    <span class="vr-ta-count" id="vr-ta-count">0 / 50</span>
-                  </div>
-                  <div class="vr-image-row">
-                    <input type="text" id="vr-image-path" class="surv-input"
-                           placeholder="图片路径"
-                           spellcheck="false" />
-                    <button type="button" class="vd-btn" id="vr-image-browse"
-                            title="从服务器选择一张图片">浏览</button>
-                    <button type="button" class="vd-btn" id="vr-image-upload"
-                            title="从本机上传一张图片">上传</button>
-                    <button type="button" class="vd-btn" id="vr-image-clear"
-                            title="清除检索图片">清除</button>
-                    <input type="file" id="vr-image-file" accept="image/*" hidden />
-                  </div>
-                  <div class="vr-image-preview" id="vr-image-preview" hidden>
-                    <img id="vr-image-thumb" alt="检索图片预览" />
-                    <span class="vd-meta" id="vr-image-name"></span>
-                  </div>
+                  <div id="vr-query-groups"></div>
                   <label class="vr-lenient-row">
                     <input type="checkbox" id="vr-image-quality" checked />
                     <span>图片质量检查（拒绝纯色 / 随机噪声图）</span>

@@ -56,9 +56,46 @@ const VR = {
   // （running）。null = 尚未拉到 / 拉取失败 → 不禁用（乐观放行，由后端
   // 503 兜底），避免网络抖动把功能全锁死。
   modeAvail: { search: null },
+  // 多组描述编辑器（QueryGroups 控制器）；batchResults 用于保护串行检索
+  // 的汇总结果不被中间 / 最后一条单组 WS 快照覆盖。
+  queryGroups: null,
+  batchRunning: false,
+  batchResults: null,
 
   init() { return initVideoRetrievalCore(); },
 };
+
+function vrReadQueryGroups() {
+  if (!window.QueryGroups || !VR.queryGroups) return [];
+  try { return window.QueryGroups.getValues(VR.queryGroups); } catch (_) { return []; }
+}
+
+function vrQueryGroupLabel(group, idx) {
+  const text = (group.text || "").trim();
+  const img = (group.imagePath || "").trim();
+  const imgName = img ? img.split(/[\\/]/).pop() : "";
+  let label = text || (imgName ? "以图检索" : "描述 " + (idx + 1));
+  if (imgName) label += "（图片：" + imgName + "）";
+  return label;
+}
+
+function vrNormalizeWizardGroups(opts) {
+  if (Array.isArray(opts && opts.searchGroups)) {
+    return opts.searchGroups
+      .map((g) => ({
+        text: String(g && g.text != null ? g.text : "").trim(),
+        imagePath: String(
+          g && (g.imagePath != null ? g.imagePath
+            : g.image_path != null ? g.image_path : "") || ""
+        ).trim(),
+      }))
+      .filter((g) => g.text || g.imagePath);
+  }
+  // 旧向导字段兼容：searchText / searchImage 映射为第一组。
+  const text = String((opts && opts.searchText) || "").trim();
+  const imagePath = String((opts && opts.searchImage) || "").trim();
+  return (text || imagePath) ? [{ text, imagePath }] : [];
+}
 
 function vrEl(id) {
   return document.getElementById(id);
@@ -176,7 +213,11 @@ function vrApplySnapshot(snap) {
   // 快照的 hits 无关 —— 勾选模式下**不能**让快照覆盖结果列表，否则会显示
   // 单例里"最后一次单视频查询"的命中（即"选了第 2 个却看到第 1 个"）。
   const inMulti = VR.cacheSel && VR.cacheSel.size > 0;
-  if (!inMulti) vrRenderHits(snap.hits || [], snap.query || null);
+  // 多组串行检索期间/结束后，单组 /query 的广播会陆续到达；不能让它们
+  // 覆盖本地汇总的分组结果。
+  if (!VR.batchRunning && !VR.batchResults && !inMulti) {
+    vrRenderHits(snap.hits || [], snap.query || null);
+  }
 }
 
 // 把检索进度条复位到初始态（清空"检索结果"时调用）。置 forceIdle 标志，
@@ -260,29 +301,6 @@ function vrSyncStatusText() {
   vrSetStatus(text, err);
 }
 
-// 检索图片状态同步：路径 → 预览缩略图 / 文件名 / 清除按钮 + 起始按钮。
-function vrSyncImageState() {
-  const pathEl = vrEl("vr-image-path");
-  const preview = vrEl("vr-image-preview");
-  const thumb = vrEl("vr-image-thumb");
-  const nameEl = vrEl("vr-image-name");
-  const p = (pathEl?.value || "").trim();
-  if (thumb && p !== VR._imageThumbPath) {
-    VR._imageThumbPath = p;
-    if (p) {
-      thumb.src = API_PREFIX + "/video-retrieval/image/thumb?path="
-        + encodeURIComponent(p);
-      thumb.alt = "检索图片预览";
-    } else {
-      thumb.removeAttribute("src");
-    }
-  }
-  if (nameEl) nameEl.textContent = p ? p.split(/[\\/]/).pop() : "";
-  if (preview) preview.hidden = !p;
-  if (pathEl) pathEl.title = p || "";
-  vrUpdateButtons();
-}
-
 // 统一按钮可用性：算力可用性 / 视频源或缓存勾选 / 检索问题 / 提取运行态。
 function vrUpdateButtons() {
   const st = (VR.snap && VR.snap.state) || "idle";
@@ -302,33 +320,27 @@ function vrUpdateButtons() {
   }
   const subS = vrEl("vr-sub-search");
   if (subS) subS.classList.toggle("vr-subsection--off", searchOff);
-  const textEl = vrEl("vr-text");
   const lenientEl = vrEl("vr-lenient");
-  const imagePathEl = vrEl("vr-image-path");
   const imageQualityEl = vrEl("vr-image-quality");
-  const imageBtns = ["vr-image-browse", "vr-image-upload", "vr-image-clear"]
-    .map((id) => vrEl(id));
-  if (textEl) textEl.disabled = searchOff;
   if (lenientEl) lenientEl.disabled = searchOff;
-  if (imagePathEl) imagePathEl.disabled = searchOff;
   if (imageQualityEl) imageQualityEl.disabled = searchOff;
-  imageBtns.forEach((b) => { if (b) b.disabled = searchOff; });
+  if (window.QueryGroups) {
+    window.QueryGroups.setDisabled(vrEl("vr-query-groups"), searchOff);
+  }
 
-  const qSearch = (textEl?.value || "").trim();
-  const hasImage = !!(imagePathEl?.value || "").trim();
-  const clearImageBtn = vrEl("vr-image-clear");
-  if (clearImageBtn) clearImageBtn.disabled = searchOff || !hasImage;
+  const groups = vrReadQueryGroups();
   const extracting = st === "extracting";
-  const canStart = !searchOff && !extracting
-    && (!!src || anyChecked) && (!!qSearch || hasImage);
+  const busy = extracting || VR.batchRunning;
+  const canStart = !searchOff && !busy
+    && (!!src || anyChecked) && groups.length > 0;
   if (startBtn) {
     startBtn.disabled = !canStart;
     let reason = "";
     if (!canStart) {
       if (searchOff) reason = "检索模型未启用，请先在「算力配置」启用";
       else if (!src && !anyChecked) reason = "请选择视频文件，或在历史记录里勾选已缓存视频";
-      else if (!qSearch && !hasImage) reason = "请填写检索问题或选择检索图片";
-      else if (extracting) reason = "检索提取进行中";
+      else if (!groups.length) reason = "请填写至少一组检索描述";
+      else if (busy) reason = "检索进行中";
     }
     startBtn.title = reason;
   }
@@ -554,76 +566,12 @@ function vrApplyMutualExclusion() {
   vrUpdateButtons();
 }
 
-async function vrQueryMulti(text, minResults) {
-  const imagePath = (vrEl("vr-image-path")?.value || "").trim();
-  const quality = !!vrEl("vr-image-quality")?.checked;
-  // 勾选路径：按窗口选中顺序（窗口行序 = analyzed_at 倒序）检索。
-  const entries = [];
-  const win = vrEl("vr-cache-window");
-  (win?.querySelectorAll(".vr-cache-check:checked") || []).forEach((cb) => {
-    entries.push({
-      md5: cb.dataset.md5,
-      chunk_seconds: Number(cb.dataset.chunk) || 0,
-      chunk_overlap_seconds: Number(cb.dataset.overlap) || 0,
-      judge_fp: cb.dataset.judgeFp || "",
-      slice_version: cb.dataset.sliceVersion || "",
-    });
-  });
-  if (!entries.length) {
-    VR.cacheSel.clear();
-    return;
-  }
-  // 防重复点击：与单视频路径共用 vrQueryAbort 守卫（本路径不携带
-  // abort signal，仅作互斥 + 40s 卡死兜底计时）。
-  if (vrQueryAbort) return;
-  vrQueryAbort = new AbortController();
-  const timer = setTimeout(() => {
-    try { vrQueryAbort.abort(); } catch (_) {}
-  }, 40000);
-  const list = vrEl("vr-results-list");
-  if (list) list.innerHTML = '<li class="vr-results-empty">检索中…</li>';
-  const count = vrEl("vr-results-count");
-  if (count) {
-    count.textContent = (imagePath ? "以图检索中…（" : "检索中…（")
-      + entries.length + " 个视频）";
-  }
-  try {
-    const r = await fetch(API_PREFIX + "/video-retrieval/query_multi", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        text, min_results: minResults || 0, entries,
-        ...(imagePath ? { image_path: imagePath } : {}),
-        check_image_quality: quality,
-      }),
-    });
-    if (!r.ok) {
-      const d = await r.json().catch(() => ({}));
-      vrShowError(d.detail || `query_multi 失败 (HTTP ${r.status})`);
-      return;
-    }
-    const d = await r.json();
-    vrRenderMultiGroups(d.groups || [], text);
-  } catch (e) {
-    vrShowError("query_multi 请求失败：" + e);
-  } finally {
-    // busy 态完整恢复 —— multi 渲染不走 vrApplySnapshot，count 必须在此清掉
-    clearTimeout(timer);
-    vrQueryAbort = null;
-    // 成功路径 vrRenderMultiGroups 已写好真实条数；仅失败/异常时 count 会
-    // 停在"检索中…（N 个视频）"→ 复位。（此处曾误用未声明的 `meta`，每次
-    // 多视频检索都在 finally 抛 ReferenceError，被 Promise.allSettled 吞掉。）
-    const cEl = vrEl("vr-results-count");
-    if (cEl && (cEl.textContent || "").indexOf("检索中…") === 0) {
-      cEl.textContent = "0 条";
-    }
-  }
-}
 
 function vrRenderMultiGroups(groups, text) {
   const list = vrEl("vr-results-list");
   const count = vrEl("vr-results-count");
   if (!list) return;
+  list.classList.remove("vr-results-list--batch");
   let html = "";
   let cardSeq = 0;
   const multi = { hits: [], sourceMap: [] };
@@ -709,15 +657,142 @@ function vrRenderMultiGroups(groups, text) {
   });
 }
 
+function vrBatchCardHtml(h, source, fps, idx, frameEnabled) {
+  const t = vrFormatTime(h.start_time) + " – " + vrFormatTime(h.end_time);
+  const sim = (h.similarity != null) ? Number(h.similarity).toFixed(2) : "--";
+  const aboveTh = h.above_threshold !== false;
+  const badgeCls = aboveTh ? "vr-badge vr-badge-ok" : "vr-badge vr-badge-low";
+  const badgeTxt = aboveTh ? "达标" : "低于阈值";
+  const t0 = (h.start_time != null) ? Number(h.start_time) : 0;
+  return `<div class="vr-card${frameEnabled ? "" : " vr-card-frame-disabled"}` +
+    (aboveTh ? "" : " vr-card-low") +
+    `" data-mi="${idx}" data-bsrc="${vrEsc(source || "")}" ` +
+    `data-bfps="${Number(fps) || 0}" data-btime="${t0}" role="button" tabindex="0">` +
+    `<div class="vr-thumb" data-bthumb="${t0}">缩略图</div>` +
+    `<div class="vr-card-info">` +
+      `<span class="vr-card-time">${vrEsc(t)}</span>` +
+      `<span class="vr-card-score">相似度 <b>${sim}</b></span>` +
+    `</div>` +
+    `<span class="${badgeCls}">${badgeTxt}</span>` +
+    `<span class="vr-card-play">▶</span>` +
+  `</div>`;
+}
+
+function vrRenderBatchResults(results) {
+  const list = vrEl("vr-results-list");
+  const count = vrEl("vr-results-count");
+  if (!list) return;
+  const hitMap = [];
+  const appendCard = (h, source, fps, frameEnabled) => {
+    const idx = hitMap.length;
+    hitMap.push(h);
+    return vrBatchCardHtml(h, source, fps, idx, frameEnabled);
+  };
+  let html = `<li class="vr-query-columns" style="--vr-query-cols:${Math.max(1, results.length)}">`;
+  let totalHits = 0;
+  results.forEach((r, qi) => {
+    const label = vrQueryGroupLabel(r.group, qi);
+    let body = "";
+    let meta = "";
+    if (r.error) {
+      meta = "失败";
+      body = `<div class="vr-results-empty">${vrEsc(r.error)}</div>`;
+    } else if (r.groups) {
+      const videoCount = r.groups.filter((g) => !g.miss).length;
+      meta = videoCount + " 个视频";
+      r.groups.forEach((g) => {
+        if (g.miss) {
+          body += `<div class="vr-results-empty">${vrEsc((g.md5 || "").slice(0, 12))}：缓存索引不可读</div>`;
+          return;
+        }
+        const params = g.slice_version === "gscore-v1"
+          ? "按变化切片"
+          : `${g.chunk_seconds || "?"}s/${g.chunk_overlap_seconds || "?"}s`;
+        body += `<div class="vr-group-head">${vrEsc(g.filename || "(未命名)")}` +
+          `<span class="vr-g-meta">${vrEsc(params)} · ${g.slices || 0}段 · top ` +
+          `${g.top_score != null ? Number(g.top_score).toFixed(2) : "--"}</span>` +
+          `<span class="vr-g-frame-tag">${g.frame_enabled ? "可取帧回看" : "仅文本"}</span></div>`;
+        const hits = g.hits || [];
+        if (!hits.length) {
+          body += '<div class="vr-results-empty">该视频无达到阈值的命中。</div>';
+          return;
+        }
+        const src = g.source_path || "";
+        const fps = Number(g.fps) || 0;
+        hits.forEach((h) => {
+          totalHits++;
+          body += appendCard(h, src, fps, !!g.frame_enabled);
+        });
+      });
+    } else {
+      const hits = (r.snap && r.snap.hits) || [];
+      meta = hits.length + " 条";
+      if (!hits.length) {
+        body = '<div class="vr-results-empty">该描述无达到阈值的命中。</div>';
+      } else {
+        const src = (r.snap && r.snap.source) || "";
+        const fps = (r.snap && Number(r.snap.fps)) || 0;
+        hits.forEach((h) => {
+          totalHits++;
+          body += appendCard(h, src, fps, true);
+        });
+      }
+    }
+    html += `<section class="vr-query-col">` +
+      `<div class="vr-query-col-head"><span class="vr-query-col-title">描述 ${qi + 1}：${vrEsc(label)}</span>` +
+      `<span class="vr-query-meta">${vrEsc(meta)}</span></div>` +
+      `<div class="vr-query-col-body">${body}</div></section>`;
+  });
+  html += "</li>";
+  list.classList.add("vr-results-list--batch");
+  list.innerHTML = html;
+  VR._batchHitMap = hitMap;
+  if (count) count.textContent = `${results.length} 组 · ${totalHits} 条`;
+  Array.from(list.querySelectorAll("[data-mi]")).forEach((el) => {
+    const h = hitMap[Number(el.dataset.mi)];
+    if (!h) return;
+    const src = el.dataset.bsrc || "";
+    const fps = Number(el.dataset.bfps) || 0;
+    const play = () => {
+      if (!src) {
+        vrShowError("该视频无本地文件（微信入库），无法播放/取帧");
+        return;
+      }
+      vrPlaySegment(h, { source: src, fps: fps || undefined,
+                          miIndex: Number(el.dataset.mi) });
+    };
+    el.addEventListener("click", play);
+    el.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        play();
+      }
+    });
+    const thumb = el.querySelector(".vr-thumb");
+    const tSec = thumb && thumb.dataset.bthumb;
+    if (thumb && src && tSec != null) {
+      const url = API_PREFIX + "/video-retrieval/frame?source=" +
+        encodeURIComponent(src) + "&t=" + encodeURIComponent(tSec);
+      const img = document.createElement("img");
+      img.alt = "";
+      img.onload = () => { thumb.textContent = ""; thumb.appendChild(img); };
+      img.onerror = () => { thumb.textContent = "取帧失败"; };
+      img.src = url;
+    }
+  });
+}
+
 /** 勾选检索入口：score+多组渲染复用单视频播放器 ——
  * ``vrPlaySegment(hit, opts)`` 的 ``opts.source`` 位索选定 video
  * 的 source_path（多视频场景下不再读 VR.snap.source）。 */
 
 
-function vrRenderHits(hits, query) {
+function vrRenderHits(hits, query, context) {
+  const ctx = context || {};
   const list = vrEl("vr-results-list");
   const count = vrEl("vr-results-count");
   if (!list) return;
+  list.classList.remove("vr-results-list--batch");
   if (!hits.length) {
     let msg;
     if (!query) {
@@ -726,7 +801,7 @@ function vrRenderHits(hits, query) {
       // 区分"完全没结果"vs"问题已查询过但没达阈值"。
       // query_meta.above_threshold_count 用于精确提示：若索引里有
       // 数据但全低于阈值，引导用户降低阈值 / 开宽松匹配。
-      const meta = (VR.snap && VR.snap.query_meta) || {};
+      const meta = ctx.meta || (VR.snap && VR.snap.query_meta) || {};
       const above = meta.above_threshold_count;
       const below = meta.below_threshold_count;
       if (typeof above === "number" && above === 0 && below > 0) {
@@ -745,8 +820,8 @@ function vrRenderHits(hits, query) {
     count.textContent = (query && query.image ? "以图检索 · " : "")
       + hits.length + " 条";
   }
-  const srcBase = (VR.snap && VR.snap.source) || "";
-  const fpsBase = (VR.snap && Number(VR.snap.fps)) || 25;
+  const srcBase = ctx.source != null ? ctx.source : (VR.snap && VR.snap.source) || "";
+  const fpsBase = Number(ctx.fps) || (VR.snap && Number(VR.snap.fps)) || 25;
   list.innerHTML = hits.map((h, i) => {
     const t = vrFormatTime(h.start_time) + " – " + vrFormatTime(h.end_time);
     const sim = (h.similarity != null) ? Number(h.similarity).toFixed(2) : "--";
@@ -1380,8 +1455,7 @@ async function vrStart(forceExtract = false) {
   VR._cacheWinOnReady = null;
   const src = (vrEl("vr-source")?.value || "").trim();
   const anyChecked = vrCheckedEntries().length > 0;
-  const qSearch = (vrEl("vr-text")?.value || "").trim();
-  const hasImage = !!(vrEl("vr-image-path")?.value || "").trim();
+  const groups = vrReadQueryGroups();
   const avail = VR.modeAvail || { search: null };
 
   if (!src && !anyChecked) {
@@ -1391,8 +1465,8 @@ async function vrStart(forceExtract = false) {
     vrShowError(`「检索」功能未启用 —— 请先在「算力配置」启用 ${VR_MODE_LABEL.search}`);
     return;
   }
-  if (!qSearch && !hasImage) {
-    vrShowError("请填写检索问题，或选择一张检索图片"); return;
+  if (!groups.length) {
+    vrShowError("请填写至少一组检索描述"); return;
   }
   vrShowError("");
   await vrStartSearch(src, anyChecked, forceExtract);
@@ -1431,62 +1505,109 @@ let vrQueryAbort = null;
 // 「宽松匹配」的兜底条数，与服务端检索上限保持一致。
 const VR_LENIENT_TOP_K = 10;
 
-async function vrQuery() {
-  const text = (vrEl("vr-text")?.value || "").trim();
-  const imagePath = (vrEl("vr-image-path")?.value || "").trim();
-  const quality = !!vrEl("vr-image-quality")?.checked;
-  // 兜底校验：「开始」在问题/图片都为空时已被 vrUpdateButtons 禁用，但本
-  // 函数还有第二条入口 —— 提取完成后 vrApplySnapshot 的 pendingQuery 自动
-  // 触发；提取期间（~90s）用户可能把输入清空，此守卫避免把空查询打到
-  // 后端（否则提示退化成 "启动失败: HTTP 400 ..."）。
-  if (!text && !imagePath) {
-    vrShowError("请输入检索问题或选择检索图片"); return;
-  }
-  if (vrQueryAbort) return;  // 已在检索中，防重复点击
-  const countEl = vrEl("vr-results-count");
-  // 宽松匹配在两条路径里都要读（分叉后各自携带 min_results 语义）
-  const lenient = !!vrEl("vr-lenient")?.checked;
-  // ---- 双路径分叉（在设置全局 busy 态之前）：勾选 ≥1 缓存条目 →
-  // 多视频检索（query_multi，自带完整的 busy 态生命周期）；否则走
-  // 原单视频 query。两路排他（勾选优先）且数据面隔离 —— multi 只读
-  // LanceDB、不触碰单例的内存索引；ready 状态下取消勾选再检索，
-  // 单例索引原样可用。
-  if (vrCheckedEntries().length > 0) {
-    await vrQueryMulti(text, lenient ? VR_LENIENT_TOP_K : 0);
+function vrNormalizeBatchResponse(data) {
+  const source = (data && data.source) || (VR.snap && VR.snap.source) || "";
+  const fps = (data && data.fps) || (VR.snap && VR.snap.fps) || 0;
+  return ((data && data.queries) || []).map((q) => {
+    const group = {
+      text: String((q && q.text) || ""),
+      imagePath: String((q && (q.image_path || q.imagePath)) || ""),
+    };
+    return {
+      group,
+      error: String((q && q.error) || ""),
+      snap: q && Object.prototype.hasOwnProperty.call(q, "hits") ? {
+        hits: q.hits || [],
+        query_meta: q.query_meta || {},
+        source,
+        fps,
+        query: { text: group.text, image: (q && q.image_name) || "" },
+      } : null,
+      groups: q && Array.isArray(q.groups) ? q.groups : null,
+    };
+  });
+}
+
+function vrRenderSingleBatchResult(result) {
+  if (result.error) {
+    vrShowError(result.error);
+    vrRenderHits([], result.group);
     return;
   }
+  if (result.groups) {
+    vrRenderMultiGroups(result.groups, result.group.text);
+    return;
+  }
+  const snap = result.snap || {};
+  vrRenderHits(snap.hits || [], snap.query || null, {
+    meta: snap.query_meta || {},
+    source: snap.source || "",
+    fps: snap.fps || 0,
+  });
+}
+
+async function vrRunBatch(groups) {
+  if (VR.batchRunning) return;
+  const entries = vrCheckedEntries();
+  const lenient = !!vrEl("vr-lenient")?.checked;
+  const minResults = lenient ? VR_LENIENT_TOP_K : 0;
+  const countEl = vrEl("vr-results-count");
+  const list = vrEl("vr-results-list");
+  vrShowError("");
+  VR.batchRunning = true;
+  VR.batchResults = null;
+  if (list) list.innerHTML = `<li class="vr-results-empty">正在检索 ${groups.length} 组描述…</li>`;
   vrQueryAbort = new AbortController();
-  const timer = setTimeout(() => vrQueryAbort.abort(), 40000);
-  if (countEl) countEl.textContent = imagePath ? "以图检索中…" : "检索中…";
+  const timer = setTimeout(() => {
+    try { vrQueryAbort.abort(); } catch (_) {}
+  }, 180000);
   try {
-    const body = { text };
-    if (imagePath) body.image_path = imagePath;
-    body.check_image_quality = quality;
-    // 严格模式（默认）：固定阈值 0.40 过滤后无命中就返回空。
-    // 勾选"宽松匹配" → min_results=10，启用 fallback：
-    //   阈值过滤完后无命中时补回 top-10（无视阈值，标"低于阈值"）。
-    if (lenient) body.min_results = VR_LENIENT_TOP_K;
-    const r = await fetch(API_PREFIX + "/video-retrieval/query", {
+    const body = {
+      queries: groups.map((g) => ({
+        text: g.text || "",
+        ...(g.imagePath ? { image_path: g.imagePath } : {}),
+      })),
+      check_image_quality: !!vrEl("vr-image-quality")?.checked,
+      min_results: minResults,
+    };
+    if (entries.length) body.entries = entries;
+    const r = await fetch(API_PREFIX + "/video-retrieval/query_batch", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
       signal: vrQueryAbort.signal,
     });
-    const data = await r.json();
-    if (!r.ok) throw new Error(data.detail || "HTTP " + r.status);
-    vrApplySnapshot(data);
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.detail || ("HTTP " + r.status));
+    const results = vrNormalizeBatchResponse(data);
+    VR.batchResults = results;
+    if (results.length === 1) {
+      vrRenderSingleBatchResult(results[0]);
+    } else {
+      vrRenderBatchResults(results);
+    }
   } catch (err) {
     if (countEl) countEl.textContent = "--";
     if (err && err.name === "AbortError") {
-      vrShowError("检索超时：40s 内未完成，请重试");
+      vrShowError("检索超时：180s 内未完成，请重试");
     } else {
-      vrShowError(err.message);
+      vrShowError(String(err && err.message || err));
     }
   } finally {
     clearTimeout(timer);
+    VR.batchRunning = false;
     vrQueryAbort = null;
     vrUpdateButtons();
   }
+}
+
+async function vrQuery() {
+  const groups = vrReadQueryGroups();
+  if (!groups.length) {
+    vrShowError("请填写至少一组检索描述"); return;
+  }
+  if (VR.batchRunning || vrQueryAbort) return;
+  await vrRunBatch(groups);
 }
 
 function initVideoRetrievalCore() {
@@ -1499,52 +1620,25 @@ function initVideoRetrievalCore() {
   const errClose = vrEl("vr-error-close");
   const resultsClear = vrEl("vr-results-clear");
   const sourceEl = vrEl("vr-source");
-  const textEl = vrEl("vr-text");
 
-  // 检索图片：服务器浏览 / 本机上传 / 清除 / 实时预览。
-  const imagePathEl = vrEl("vr-image-path");
-  const imageFileEl = vrEl("vr-image-file");
-  const imageBrowseBtn = vrEl("vr-image-browse");
-  const imageUploadBtn = vrEl("vr-image-upload");
-  const imageClearBtn = vrEl("vr-image-clear");
-  imagePathEl?.addEventListener("input", vrSyncImageState);
-  imagePathEl?.addEventListener("change", vrSyncImageState);
-  imageBrowseBtn?.addEventListener("click", () => {
-    if (!imagePathEl || !VdFsModal) return;
-    VdFsModal._sourceTarget = imagePathEl;
-    VdFsModal.open("");
-  });
-  imageUploadBtn?.addEventListener("click", () => imageFileEl?.click());
-  imageFileEl?.addEventListener("change", async () => {
-    const f = imageFileEl.files && imageFileEl.files[0];
-    if (!f) return;
-    imageUploadBtn.disabled = true;
-    try {
-      const fd = new FormData();
-      fd.append("file", f);
-      const r = await fetch(API_PREFIX + "/video-retrieval/upload",
-                            { method: "POST", body: fd });
-      const data = await r.json().catch(() => ({}));
-      if (!r.ok || !data.path) {
-        throw new Error(data.detail || ("HTTP " + r.status));
-      }
-      if (imagePathEl) {
-        imagePathEl.value = data.path;
-        imagePathEl.dispatchEvent(new Event("change", { bubbles: true }));
-      }
-    } catch (e) {
-      vrShowError("图片上传失败: " + (e && e.message ? e.message : e));
-    } finally {
-      imageUploadBtn.disabled = false;
-      imageFileEl.value = "";
-    }
-  });
-  imageClearBtn?.addEventListener("click", () => {
-    if (!imagePathEl) return;
-    imagePathEl.value = "";
-    imagePathEl.dispatchEvent(new Event("change", { bubbles: true }));
-  });
-  if (imagePathEl) vrSyncImageState();
+  // 最多 5 组的“描述”编辑器。图片浏览/上传/预览/清除都由共享组件处理。
+  if (window.QueryGroups) {
+    VR.queryGroups = window.QueryGroups.mount(vrEl("vr-query-groups"), {
+      presentation: "entries",
+      maxGroups: 5,
+      minGroups: 0,
+      emptyRows: 0,
+      maxTextLength: 50,
+      textPlaceholder: "例如：有人在搬箱子 / 货车驶入 / 穿红色衣服的人",
+      imagePlaceholder: "图片路径（可选）",
+      browse: true,
+      upload: true,
+      uploadEndpoint: API_PREFIX + "/video-retrieval/upload",
+      thumbnailEndpoint: API_PREFIX + "/video-retrieval/image/thumb",
+      onChange: () => vrUpdateButtons(),
+      onError: (msg) => vrShowError(msg),
+    });
+  }
 
   const syncSourceMeta = () => {
     const v = (sourceEl?.value || "").trim();
@@ -1661,9 +1755,13 @@ function initVideoRetrievalCore() {
                             { method: "POST" });
       if (r.ok) vrApplySnapshot(await r.json());
     } catch (_) {}
+    // 多组批量结果也由前端持有，清空时一起复位。
+    VR.batchResults = null;
+    VR._batchHitMap = null;
     // 勾选（多视频）路径下 vrApplySnapshot 不覆盖结果列表 → 显式清一次
     const list = vrEl("vr-results-list");
     if (list) {
+      list.classList.remove("vr-results-list--batch");
       list.innerHTML =
         '<li class="vr-results-empty">完成提取后输入问题检索，命中片段显示在这里。</li>';
     }
@@ -1675,8 +1773,6 @@ function initVideoRetrievalCore() {
     if (VR.seg) vrStopPlayback();
   });
 
-  // 50 字计数（检索问题）
-  bindTaCounter(textEl, vrEl("vr-ta-count"));
 
   // 播放器按钮 —— 按当前模式分派：视频源预览（previewWs）走 VideoSession
   // 控制（播放/暂停/停止，与 vd 页同款），检索片段回放走 /search/play。
@@ -1762,9 +1858,9 @@ initVideoRetrieval();
 // ------------------------------------------------------------------ *
 //  应用向导模式 API — wizard 框架 finish 时调用
 // 契约:opts 由 wizard.json 的 steps[].fields[].ui_key 决定:
-//   vr-source → opts.source   vr-text → opts.searchText
+//   vr-source → opts.source   vr-query-groups → opts.searchGroups
 // source 齐全时启动检索（先提取再检索）；
-// searchText 非空时写入检索问题框。切片参数固化为服务端常量，向导不收集。
+// searchGroups 写入应用页多组描述编辑器。切片参数固化为服务端常量。
 // 写值后统一补发 input/change —— 卡片内源框 / 勾选框的监听依赖它们。
 // 全局名约定 ImApp_<app.id 去掉 hyphen>。
 // ------------------------------------------------------------------ *
@@ -1824,16 +1920,19 @@ window.ImApp_video_retrieval.applyWizardSnapshot = async function (opts) {
   // 向导是"新任务"：清掉页面上残留的缓存勾选（否则会被误判为多视频检索）。
   VR.cacheSel.clear();
   document.querySelectorAll(".vr-cache-check").forEach((cb) => { cb.checked = false; });
+  VR.batchResults = null;
+  VR._batchHitMap = null;
 
   if (opts.source) setVal("vr-source", opts.source);
   if (opts.loop != null) setChecked("vr-loop", !!opts.loop);
-  // 检索问题 / 图片：必须**无条件**与本次向导对齐。只在有值时写入会让
-  // 上一轮图片（或文字）残留在功能页，第二轮纯文字检索仍带着旧图。
-  const hasSearch = !!(opts.searchText && String(opts.searchText).trim());
-  setVal("vr-text", hasSearch ? String(opts.searchText) : "");
-  setVal("vr-image-path",
-         opts.searchImage != null ? String(opts.searchImage || "") : "");
-  vrSyncImageState();
+  // 检索描述组：必须**无条件**与本次向导对齐。空数组也会把上一轮的
+  // 图片/文字组清空；旧 searchText/searchImage 字段兼容为第一组。
+  const groups = vrNormalizeWizardGroups(opts);
+  const hasSearch = groups.length > 0;
+  if (VR.queryGroups && window.QueryGroups) {
+    window.QueryGroups.setValues(VR.queryGroups, groups);
+    vrUpdateButtons();
+  }
   if (opts.checkImageQuality != null) {
     setChecked("vr-image-quality", !!opts.checkImageQuality);
   }

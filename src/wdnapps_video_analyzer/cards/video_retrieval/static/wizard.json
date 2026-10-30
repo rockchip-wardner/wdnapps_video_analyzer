@@ -1,7 +1,7 @@
 {
   "enabled": true,
   "wizard_title": "监控反查快速配置",
-  "force_reset_fields": ["vr-search-image", "vr-text"],
+  "force_reset_fields": ["vr-query-groups", "vr-text", "vr-search-image"],
   "swcap_to_model": {
     "swcap_vision_embedding": {
       "npu_index": 1,
@@ -29,7 +29,8 @@
           "id": "vr-source",
           "ui_key": "source",
           "label": "视频源 URL / 路径",
-          "placeholder": "例 /userdata/test/clips/sample.mp4"
+          "placeholder": "例 /userdata/test/clips/sample.mp4",
+          "required": true
         },
         {
           "id": "vr-loop",
@@ -84,22 +85,19 @@
       "kind": "form",
       "fields": [
         {
-          "id": "vr-text",
-          "ui_key": "searchText",
-          "label": "例:视频里有没有车辆驶出停车场",
-          "summary_label": "检索问题",
-          "type": "textarea"
-        },
-        {
-          "id": "vr-search-image",
-          "ui_key": "searchImage",
-          "label": "检索图片（可选，可与文字组合）",
-          "type": "text",
-          "browse": true,
-          "upload": true,
-          "image_preview": true,
+          "id": "vr-query-groups",
+          "ui_key": "searchGroups",
+          "label": "检索描述（最多 5 组）",
+          "type": "query_groups",
+          "required": true,
+          "max_groups": 5,
+          "min_groups": 1,
+          "max_text_length": 50,
+          "placeholder": "例如：有人在搬箱子 / 货车驶入 / 穿红色衣服的人",
+          "image_placeholder": "图片路径（可选）",
+          "upload_endpoint": "/api/video-retrieval/upload",
           "thumbnail_endpoint": "/api/video-retrieval/image/thumb",
-          "placeholder": "选择或上传一张图片；留空则只用文字检索"
+          "legacy_fields": ["vr-text", "vr-search-image"]
         },
         {
           "id": "vr-check-image-quality",

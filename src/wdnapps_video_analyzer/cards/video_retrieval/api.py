@@ -292,67 +292,19 @@ async def delete_cache_entry(payload: dict) -> dict:
             "session_reset": session_reset}
 
 
-@router.post("/query_multi")
-async def query_multi(payload: dict) -> dict:
-    """对**一组已缓存条目**依次做文本检索（勾选路径，多选）。
-
-    Body: ``{text, min_results?, entries: [{md5, chunk_seconds,
-    chunk_overlap_seconds}]}``。匹配阈值固定 0.40、检索上限固定 10
-    （``sim_threshold`` / ``top_k`` 即使传入也会被忽略）。``entries``
-    里的切片参数是缓存条目主键，按条目自身记录检索（历史条目可能是
-    4s/1s 之外的参数）。
-
-    无状态批量语义：``embed_text`` 只算一次，然后逐条目从 lance
-    还原向量做余弦检索 —— 不触碰当前单例的内存索引 / 状态机
-    （"浏览选文件"路径不受勾选检索污染）。
-
-    宽松匹配（``min_results > 0``）为**全局判定 + 全局兜底**：所有
-    组合计无达标命中时，才把各组低于阈值的候选全局降序取 top
-    ``min_results`` 条按来源组落位（共享一份配额，标 below）；任一
-    组有达标命中则全部不兜底。返回::
-
-        {groups: [{md5, filename, source_path, chunk_seconds,
-          chunk_overlap_seconds, duration_s, slices, frame_enabled,
-          hits, top_score, fallback_used, miss}]}
-    （lance 里查不到的条目 → ``miss=True, hits=[]``）
-    """
-    payload = payload or {}
-    text = (payload.get("text") or "").strip()
-    image_path = (payload.get("image_path") or "").strip()
-    check_quality = bool(payload.get("check_image_quality", True))
-    if not text and not image_path:
-        raise HTTPException(status_code=400, detail="请至少填写检索问题或选择一张图片")
-    entries = payload.get("entries") or []
-    if not isinstance(entries, list) or not entries:
-        raise HTTPException(status_code=400, detail="entries 不能为空")
-
-    try:
-        # 阈值 / 上限固化（忽略 body 传入值，改参数请改 search.py 常量）。
-        sim_threshold = FIXED_SIM_THRESHOLD
-        top_k = FIXED_TOP_K
-        min_results = int(payload.get("min_results", 0) or 0)
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="参数类型错误")
-    if not 0.0 <= sim_threshold <= 1.0:
-        raise HTTPException(status_code=400, detail="阈值必须在 0–1.0 之间")
-    if not 1 <= top_k <= 10:
-        raise HTTPException(status_code=400, detail="上限必须在 1–10 之间")
-    if min_results < 0:
-        min_results = 0
-
-    from app.core.video.cache import get_video_cache
-    c = get_video_cache()
-    if c is None:
-        raise HTTPException(status_code=409, detail="缓存未启用（cache_enabled=false 或 lancedb 不可用）")
-    # 去重 + 截断条目数（防误传超大列表）
+def _clean_cache_entries(entries: list) -> list:
+    """Validate/dedupe the cache-entry keys used by the batch endpoint."""
     clean: list = []
     seen = set()
-    for e in entries:
+    for e in entries or []:
         if not isinstance(e, dict):
             continue
         md5 = (e.get("md5") or "").strip()
-        cs = int(e.get("chunk_seconds") or 0)
-        ov = int(e.get("chunk_overlap_seconds") or 0)
+        try:
+            cs = int(e.get("chunk_seconds") or 0)
+            ov = int(e.get("chunk_overlap_seconds") or 0)
+        except (TypeError, ValueError):
+            continue
         jfp = e.get("judge_fp")
         sver = e.get("slice_version")
         key = (md5, cs, ov, jfp, sver)
@@ -361,115 +313,190 @@ async def query_multi(payload: dict) -> dict:
             clean.append({"md5": md5, "chunk_seconds": cs,
                           "chunk_overlap_seconds": ov,
                           "judge_fp": jfp, "slice_version": sver})
-    if not clean:
-        raise HTTPException(status_code=400, detail="entries 里的 md5 均为空")
+    return clean
 
-    from app.core.video.search import _score_hits
-    try:
-        # 未启用模型 → RuntimeError → 502（与单视频 query 端点同语义）。
-        session = get_service()._ensure_session()
-    except RuntimeError as e:
-        raise HTTPException(status_code=502, detail=str(e)) from e
 
-    # 图 / 文 / 图+文：与单视频 query 共用同一个编码入口（锁在
-    # ``encode_query`` 内部，这里不再重复持有）。
-    #
-    # ``encode_query`` 会为「空输入 / 路径不存在 / 格式不对 / 图片纯色 /
-    # 噪声过高 / 文字超长」抛 ValueError。这里必须接住转 400 —— 不接的话
-    # 异常冒泡成 500（非 JSON），前端只能显示 "query_multi 失败 (HTTP 500)"，
-    # 用户看不到「图片几乎是纯色」这类真实原因（与单视频 /query 的
-    # 400 + detail 体验不一致）。
-    try:
-        qvec = get_service().encode_query(text, image_path, check_quality)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    except RuntimeError as e:
-        raise HTTPException(status_code=502, detail=str(e)) from e
+def _run_cache_query_batch(service, cache, clean: list, queries: list,
+                           check_quality: bool, min_results: int) -> list:
+    """Execute 1..5 queries against selected cache entries.
+
+    Cache lookup happens once per entry; each query is scored independently.
+    Lenient fallback is per query, matching the legacy one-query semantics.
+    """
     import numpy as np
-    qvec = np.asarray(qvec, dtype=np.float32).reshape(-1)
-    qvec = qvec / (float(np.linalg.norm(qvec)) + 1e-9)
+    from app.core.video.search import _score_hits
 
-    # ---- 两阶段评分（宽松匹配 = 全局判定 + 全局兜底） ----
-    # 阶段 1：每组先做**严格**检索（min_results=0，阈值过滤 + 组内
-    # top_k），累计全组合计的达标命中数。此前每组各自带 min_results
-    # 兜底 —— N 个视频全无命中会兜出 N×top_k 条（每个视频各一份），
-    # 与"一次总的宽松匹配"语义不符（用户决策 v0.12.4）。
-    groups = []
-    index_by_gi: list = []      # (group_dict, cached_index) 供阶段 2
-    total_above = 0
+    session = service._ensure_session()
+    model_id = (getattr(session, "model_id", None)
+                or getattr(session, "_model_id", "") or "")
+    cached_entries = []
     for e in clean:
-        cached = None
         try:
-            cached = c.lookup(e["md5"],
-                              getattr(session, "model_id", None)
-                              or getattr(session, "_model_id", "") or "",
-                              e["chunk_seconds"], e["chunk_overlap_seconds"],
-                              judge_fp=e["judge_fp"],
-                              slice_version=e["slice_version"])
+            cached = cache.lookup(
+                e["md5"], model_id, e["chunk_seconds"],
+                e["chunk_overlap_seconds"], judge_fp=e["judge_fp"],
+                slice_version=e["slice_version"])
         except Exception as exc:  # noqa: BLE001
-            LOG.warning("vr query_multi: lookup %s failed: %s",
+            LOG.warning("vr query_batch: lookup %s failed: %s",
                         e["md5"][:12], exc)
-        if cached is None:
-            groups.append({
-                "md5": e["md5"], "miss": True, "filename": "",
-                "hits": [], "frame_enabled": False,
-            })
-            continue
-        # video_path 不覆写 —— cache 索引无 video_path 字段；
-        # hits 的取帧走 group.source_path。
-        hits_, meta = _score_hits(
-            qvec, cached["index"], sim_threshold, top_k, 0)
-        total_above += int(meta["above_threshold_count"])
-        source_path = cached.get("source_path") or ""
-        g = {
-            "md5": e["md5"],
-            "miss": False,
-            "filename": cached.get("filename") or "",
-            "source_path": source_path,
-            "frame_enabled": bool(source_path) and os.path.isfile(source_path),
-            "chunk_seconds": e["chunk_seconds"],
-            "chunk_overlap_seconds": e["chunk_overlap_seconds"],
-            "judge_fp": cached.get("judge_fp")
-                        or (e["judge_fp"] if e["judge_fp"] is not None else ""),
-            "slice_version": cached.get("slice_version")
-                        or (e["slice_version"] if e["slice_version"] is not None else ""),
-            "duration_s": cached.get("duration_s") or 0.0,
-            "slices": len(cached["index"]),
-            "hits": hits_,
-            "top_score": meta["top_score"],
-            "above_threshold_count": meta["above_threshold_count"],
-            "below_threshold_count": meta["below_threshold_count"],
-            "fallback_used": False,
-        }
-        groups.append(g)
-        index_by_gi.append((g, cached["index"]))
+            cached = None
+        cached_entries.append((e, cached))
 
-    # 阶段 2：全组合计**零达标命中**且勾选宽松匹配 → 收集所有组低于
-    # 阈值的候选，全局降序取 top min_results 条（跨组共享一份配额，
-    # 非"每组一份"），按来源组落位并标 below_threshold。有任一达标
-    # 命中时不兜底（无命中的组只显示"无命中"提示行）。
-    if min_results > 0 and total_above == 0 and index_by_gi:
-        cands: list = []
-        for gi, (g, index) in enumerate(index_by_gi):
-            if g["hits"]:
-                continue
-            fb, _ = _score_hits(
-                qvec, index, sim_threshold, top_k, min_results)
-            for h in fb:
-                if h.get("similarity", 0.0) >= sim_threshold:
+    out = []
+    for qi, q in enumerate(queries):
+        text = (q.get("text") or "").strip()
+        image_path = (q.get("image_path") or "").strip()
+        image_name = os.path.basename(image_path) if image_path else ""
+        item = {
+            "index": qi,
+            "text": text,
+            "image_path": image_path,
+            "image_name": image_name,
+            "error": "",
+            "groups": [],
+        }
+        if not text and not image_path:
+            item["error"] = "请至少填写检索问题或选择一张图片"
+            out.append(item)
+            continue
+        if text and len(text) > 50:
+            item["error"] = str(ValueError("检索问题不能超过 50 个字"))
+            out.append(item)
+            continue
+        try:
+            qvec = service.encode_query(text, image_path, check_quality)
+            qvec = np.asarray(qvec, dtype=np.float32).reshape(-1)
+            qvec = qvec / (float(np.linalg.norm(qvec)) + 1e-9)
+            groups = []
+            index_by_gi = []
+            total_above = 0
+            for e, cached in cached_entries:
+                if cached is None:
+                    groups.append({
+                        "md5": e["md5"], "miss": True, "filename": "",
+                        "hits": [], "frame_enabled": False,
+                    })
                     continue
-                cands.append((float(h["similarity"]), gi, h))
-        cands.sort(key=lambda t: -t[0])
-        for sim, gi, h in cands[:min_results]:
-            g = index_by_gi[gi][0]
-            h["above_threshold"] = False
-            g["hits"].append(h)
-            g["fallback_used"] = True
-        LOG.info("vr query_multi: global lenient fallback — %d strict "
-                 "hits total=%d candidates, kept=%d",
-                 total_above, len(cands), min(len(cands), min_results))
-    return {"ok": True, "text": text, "sim_threshold": sim_threshold,
-            "top_k": top_k, "groups": groups}
+                hits_, meta = _score_hits(
+                    qvec, cached["index"], FIXED_SIM_THRESHOLD,
+                    FIXED_TOP_K, 0)
+                total_above += int(meta["above_threshold_count"])
+                source_path = cached.get("source_path") or ""
+                g = {
+                    "md5": e["md5"],
+                    "miss": False,
+                    "filename": cached.get("filename") or "",
+                    "source_path": source_path,
+                    "frame_enabled": bool(source_path) and os.path.isfile(source_path),
+                    "chunk_seconds": e["chunk_seconds"],
+                    "chunk_overlap_seconds": e["chunk_overlap_seconds"],
+                    "judge_fp": cached.get("judge_fp")
+                                or (e["judge_fp"] if e["judge_fp"] is not None else ""),
+                    "slice_version": cached.get("slice_version")
+                                or (e["slice_version"] if e["slice_version"] is not None else ""),
+                    "duration_s": cached.get("duration_s") or 0.0,
+                    "slices": len(cached["index"]),
+                    "hits": hits_,
+                    "top_score": meta["top_score"],
+                    "above_threshold_count": meta["above_threshold_count"],
+                    "below_threshold_count": meta["below_threshold_count"],
+                    "fallback_used": False,
+                }
+                groups.append(g)
+                index_by_gi.append((g, cached["index"]))
+            if min_results > 0 and total_above == 0 and index_by_gi:
+                cands = []
+                for gi, (g, index) in enumerate(index_by_gi):
+                    if g["hits"]:
+                        continue
+                    fb, _ = _score_hits(
+                        qvec, index, FIXED_SIM_THRESHOLD, FIXED_TOP_K,
+                        min_results)
+                    for h in fb:
+                        if h.get("similarity", 0.0) >= FIXED_SIM_THRESHOLD:
+                            continue
+                        cands.append((float(h["similarity"]), gi, h))
+                cands.sort(key=lambda t: -t[0])
+                for _, gi, h in cands[:min_results]:
+                    g = index_by_gi[gi][0]
+                    h["above_threshold"] = False
+                    g["hits"].append(h)
+                    g["fallback_used"] = True
+            item["groups"] = groups
+        except ValueError as exc:
+            item["error"] = str(exc)
+        out.append(item)
+    return out
+
+
+@router.post("/query_batch")
+async def query_batch(payload: dict) -> dict:
+    """Unified single/multi query endpoint.
+
+    Body: ``{queries: [{text?, image_path?}], entries?: [...],
+    check_image_quality?, min_results?}``.  ``entries`` selects the cached
+    multi-video path; otherwise the current ``VideoSession`` index is used.
+    """
+    payload = payload or {}
+    raw = payload.get("queries")
+    if raw is None:
+        # Keep one-query body compatibility for callers that predate the UI.
+        raw = [{"text": payload.get("text") or "",
+                "image_path": payload.get("image_path") or ""}]
+    if not isinstance(raw, list):
+        raise HTTPException(status_code=400, detail="queries 必须是列表")
+    if not 1 <= len(raw) <= 5:
+        raise HTTPException(status_code=400, detail="queries 必须包含 1~5 组")
+    queries = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise HTTPException(status_code=400, detail="每个 query 必须是对象")
+        queries.append({
+            "text": (item.get("text") or "").strip(),
+            "image_path": (item.get("image_path") or item.get("imagePath") or "").strip(),
+        })
+    entries = payload.get("entries") or []
+    if not isinstance(entries, list):
+        raise HTTPException(status_code=400, detail="entries 必须是列表")
+    check_quality = bool(payload.get("check_image_quality", True))
+    try:
+        min_results = max(0, int(payload.get("min_results", 0) or 0))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="min_results 必须为数值")
+
+    service = get_service()
+    loop = asyncio.get_event_loop()
+    timeout = min(180.0, max(35.0, 35.0 * len(queries)))
+    if entries:
+        from app.core.video.cache import get_video_cache
+        cache = get_video_cache()
+        if cache is None:
+            raise HTTPException(status_code=409, detail="缓存未启用（cache_enabled=false 或 lancedb 不可用）")
+        clean = _clean_cache_entries(entries)
+        if not clean:
+            raise HTTPException(status_code=400, detail="entries 里的 md5 均为空")
+        call = functools.partial(
+            _run_cache_query_batch, service, cache, clean, queries,
+            check_quality, min_results)
+        mode = "cache"
+    else:
+        call = functools.partial(
+            service.query_batch, queries,
+            check_image_quality=check_quality, min_results=min_results)
+        mode = "source"
+
+    try:
+        result = await asyncio.wait_for(
+            loop.run_in_executor(None, call), timeout=timeout)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="检索超时（可能 NPU 繁忙）")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    if mode == "cache":
+        return {"ok": True, "mode": "cache", "queries": result}
+    return {"ok": True, **result}
 
 
 @router.post("/cache/clear")
@@ -601,59 +628,6 @@ async def start_extract(payload: dict) -> dict:
 async def stop_extract() -> dict:
     """停止切片提取。"""
     return get_service().stop_extract()
-
-
-@router.post("/query")
-async def query_video(payload: dict) -> dict:
-    """检索（文字 / 图片 / 图片+文字）；匹配阈值固定 0.40、上限固定 10。
-
-    Body: ``{text?, image_path?, check_image_quality?, min_results?, debug?}``。
-    ``text`` 与 ``image_path`` 至少一个；两者同时给 = 图+文组合查询。
-    ``check_image_quality`` 默认 ``True``（拒绝纯色/随机噪声图）。
-    ``sim_threshold`` / ``top_k`` 即使传入也会被忽略（改参数请改
-    ``app/core/video/search.py`` 的 ``FIXED_SIM_THRESHOLD`` / ``FIXED_TOP_K``）。
-
-    固定阈值严格过滤相似度，返回的每条 hit 都满足
-    ``similarity >= 0.40``。当 **没有任何** hit 达到阈值，
-    默认返回空列表；调用方如果想看"最佳猜测"（即使低于阈值），
-    显式传 ``min_results=N`` 启用 fallback 模式（页面「宽松匹配」用
-    N=10）。
-    """
-    payload = payload or {}
-    text = (payload.get("text") or "").strip()
-    image_path = (payload.get("image_path") or "").strip()
-    check_quality = bool(payload.get("check_image_quality", True))
-    debug = bool(payload.get("debug", False))
-    try:
-        # 阈值 / 上限固化：忽略 body 传入值，改参数请改模块常量。
-        sim_threshold = FIXED_SIM_THRESHOLD
-        top_k = FIXED_TOP_K
-        # 默认 0 = 严格模式，没有达到阈值的片段就返回空。
-        # 设为 N>0 时启用 fallback：阈值过滤完后无命中时，
-        # 补回 top-N（无视阈值）。
-        min_results = int(payload.get("min_results", 0))
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="min_results 必须为数值")
-    # embed_* 是同步 NPU 推理：挪到线程池执行（不阻塞 event loop），
-    # 并加 35s 超时兜底 —— SDK 卡死时前端不会无限 pending（对齐 VFA 做法）。
-    loop = asyncio.get_event_loop()
-    call = functools.partial(
-        get_service().query,
-        text, sim_threshold, top_k, min_results, debug,
-        image_path=image_path, check_image_quality=check_quality,
-    )
-    try:
-        return await asyncio.wait_for(
-            loop.run_in_executor(None, call),
-            timeout=35.0,
-        )
-    except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail="检索超时：35s 内未完成（可能 NPU 繁忙）")
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except RuntimeError as e:
-        # wdnai 缺失 / 功能未启用（实例在提取后被停掉等情况）
-        raise HTTPException(status_code=503, detail=str(e))
 
 
 @router.websocket("/ws")
