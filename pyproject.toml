@@ -44,6 +44,7 @@ dev = ["pytest>=7", "build>=1.0"]
 "video-target-detection" = "wdnapps_video_analyzer.cards.video_target_detection"
 "video-target-localization" = "wdnapps_video_analyzer.cards.video_target_localization"
 "video-retrieval" = "wdnapps_video_analyzer.cards.video_retrieval"
+"video-depth" = "wdnapps_video_analyzer.cards.video_depth"
 "audio-analysis" = "wdnapps_video_analyzer.cards.audio_analysis"
 
 [tool.setuptools.packages.find]
@@ -59,4 +60,5 @@ exclude = ["tests*"]
 "wdnapps_video_analyzer.cards.video_target_detection" = ["manifest.json", "static/*"]
 "wdnapps_video_analyzer.cards.video_target_localization" = ["manifest.json", "static/*"]
 "wdnapps_video_analyzer.cards.video_retrieval" = ["manifest.json", "static/*"]
+"wdnapps_video_analyzer.cards.video_depth" = ["manifest.json", "static/*"]
 "wdnapps_video_analyzer.cards.audio_analysis" = ["manifest.json", "static/*"]

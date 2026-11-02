@@ -1,0 +1,33 @@
+{
+  "enabled": true,
+  "wizard_title": "视频实时深度估计快速配置",
+  "swcap_to_model": {
+    "swcap_vision_depth": { "npu_index": [0, 1], "model_id": "DepthAnythingV3" }
+  },
+  "open_source_button": "vdp-open",
+  "canvas_id": "vdp-grid",
+  "upload_endpoint": "/api/video-depth/upload",
+  "start_buttons": ["vdp-detector-start"],
+  "steps": [
+    { "id": "env",    "title": "运行环境检查",     "kind": "env_check" },
+    { "id": "source", "title": "视频源",           "kind": "form",
+      "fields": [
+        { "id": "vdp-sources", "ui_key": "source", "label": "视频源（每行一路，最多 32 路）", "type": "textarea" },
+        { "id": "vdp-loop",   "ui_key": "loop",   "label": "循环播放", "type": "checkbox", "default": true },
+        { "id": "vdp-judge-mode", "ui_key": "judgeMode", "label": "判帧算法（决定哪些帧送去算深度）", "type": "select",
+          "options": [
+            { "value": "manual", "label": "每帧都算（推荐：DA3 单路只要 ~116ms，轮转本身就是节流）", "selected": true },
+            { "value": "gscore", "label": "gscore 画面变化（只在画面明显变化时才算，省算力）" }
+          ]
+        },
+        { "id": "vdp-judge-threshold", "ui_key": "judgeThreshold", "label": "变化阈值（越小越敏感）", "type": "number",
+          "default": 10, "min": "0.1", "step": "0.1",
+          "placeholder": "默认 10（刻度按算法不同，切换算法会换成该算法的默认值）" },
+        { "id": "vdp-judge-every-n", "ui_key": "judgeEveryN", "label": "帧间隔（有变化时的最长间隔）", "type": "number",
+          "default": 600, "min": "1", "max": "3600", "step": "1",
+          "placeholder": "默认 600" }
+      ]
+    },
+    { "id": "finish", "title": "完成配置",          "kind": "finish" }
+  ]
+}

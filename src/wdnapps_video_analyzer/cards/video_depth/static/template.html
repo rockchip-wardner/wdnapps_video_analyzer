@@ -1,0 +1,114 @@
+      <section id="page-video-depth" class="page hidden" data-page="video-depth">
+        <header class="page-header">
+          <h2>视频实时深度估计</h2>
+          <button class="wizard-mode-btn" data-wizard-mode data-page-id="video-depth">向导模式</button>
+        </header>
+
+        <!-- 左：实时视频流 / 右：逐路深度热力图。
+             两栏各自是一个 .vd-grid（宫格 div 自己就是 .vd-stage），
+             共享组件 multi-grid.js 负责建格与上屏。 -->
+        <div class="vdp-split">
+          <div class="vdp-pane">
+            <div class="vdp-pane-head">
+              <span class="vdp-pane-title">实时视频流</span>
+              <span class="vd-meta" id="vdp-meta">--</span>
+            </div>
+            <div class="vd-stage vd-grid" id="vdp-grid" data-cols="1">
+              <!-- 1~32 格宫格，由 app.js 按通道数重建（共享组件 multi-grid.js） -->
+              <!-- 提示层放在 grid 内部：absolute 定位不参与网格布局，inset:0 正好罩住画面 -->
+              <div class="vd-overlay" id="vdp-overlay"></div>
+            </div>
+            <div class="vd-progress">
+              <div class="vd-progress-bar" id="vdp-progress"></div>
+            </div>
+          </div>
+
+          <div class="vdp-pane">
+            <div class="vdp-pane-head">
+              <span class="vdp-pane-title">深度热力图</span>
+              <span class="vd-meta" id="vdp-depth-meta">--</span>
+            </div>
+            <div class="vd-stage vd-grid" id="vdp-depth-grid" data-cols="1">
+              <!-- 深度画面：走事件通道（depth_b64），不是二进制帧通道 -->
+              <div class="vd-overlay" id="vdp-depth-overlay"></div>
+            </div>
+            <!-- 色标：条在上、说明在下。说明文字横排在条的右边会有歧义
+                 （读起来像右边那一段另有所指），压在下面才是「这条色标
+                 的含义」。 -->
+            <div class="vdp-legend">
+              <span class="vdp-legend-bar"></span>
+              <span class="vdp-legend-text">远 ← 1/深度 → 近（色标窗口跨路共享）</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 控制面板放在**下方**：用户明确要求左右两栏是「视频 / 深度」，
+             所以控制区不能挤在中间那一列。 -->
+        <div class="vdp-panel">
+          <div class="vdp-panel-col">
+            <section class="surv-form-section">
+              <header class="surv-form-head">
+                <h3>视频源</h3>
+                <span class="surv-hint" id="vdp-channel-hint">尚未播放视频</span>
+              </header>
+              <div class="surv-field">
+                <textarea id="vdp-sources" class="surv-input surv-textarea vdp-sources"
+                          rows="4" spellcheck="false"
+                          placeholder="每行一路，最多 32 路&#10;/userdata/assets/720p/rk-0.mp4&#10;rtsp://192.168.1.10:554/stream1"></textarea>
+                <div class="vd-actions-row">
+                  <button type="button" class="vd-btn vd-btn-primary" id="vdp-browse">浏览…</button>
+                  <button type="button" class="vd-btn vd-btn-primary" id="vdp-open">播放视频</button>
+                  <button type="button" class="vd-btn" id="vdp-close">关闭</button>
+                  <label class="vd-loop-toggle" title="文件源播放完后自动从头重播；直播无效">
+                    <input type="checkbox" id="vdp-loop" checked />
+                    <span>循环播放</span>
+                  </label>
+                </div>
+                <div class="vd-actions-row">
+                  <button type="button" class="vd-btn" id="vdp-play">▶ 播放</button>
+                  <button type="button" class="vd-btn" id="vdp-pause">⏸ 暂停</button>
+                  <button type="button" class="vd-btn" id="vdp-stop">⏹ 停止</button>
+                </div>
+              </div>
+            </section>
+
+            <section class="surv-form-section vdp-judge-section" id="vdp-judge-section">
+              <header class="surv-form-head">
+                <h3>判帧算法</h3>
+                <span class="surv-hint" id="vdp-judge-selected">当前在设置的是 <b id="vdp-judge-selected-idx">--</b> 路 (<span id="vdp-judge-selected-no">--</span>) · 模式 <span id="vdp-judge-selected-mode">--</span> · 阈值 <span id="vdp-judge-selected-thr">--</span> · 帧间隔 <span id="vdp-judge-selected-every-n">--</span></span>
+                <button type="button" class="vd-btn" id="vdp-judge-apply-all" hidden>应用到所有路</button>
+              </header>
+              <div id="vdp-judge-config" data-judge-layout="inline"></div>
+            </section>
+          </div>
+
+          <div class="vdp-panel-col">
+            <section class="surv-form-section">
+              <header class="surv-form-head">
+                <h3>深度模型</h3>
+                <span class="surv-hint" id="vdp-detector-status">未启动</span>
+              </header>
+              <div class="surv-field">
+                <div id="vdp-model-pick" class="vtd-inst-list"
+                     data-capability="swcap_vision_depth"></div>
+                <span class="surv-hint">勾选的每个实例各占一张卡，并行送检</span>
+              </div>
+              <div class="surv-field">
+                <div class="vd-detector-row">
+                  <button type="button" class="vd-btn vd-btn-primary" id="vdp-detector-start">启动深度估计</button>
+                  <button type="button" class="vd-btn" id="vdp-detector-stop" disabled>停止深度估计</button>
+                </div>
+                <span class="surv-hint" id="vdp-detector-hint">
+                  深度估计没有文本输入 —— 直接对每一路当前帧做单目深度估计，
+                  结果以 turbo 热力图显示在右栏。
+                </span>
+              </div>
+            </section>
+          </div>
+        </div>
+
+        <details class="raw-output">
+          <summary>完整 JSON</summary>
+          <pre class="payload" id="data-video-depth"></pre>
+        </details>
+      </section>

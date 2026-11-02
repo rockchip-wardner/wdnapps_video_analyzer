@@ -1,0 +1,68 @@
+{
+  "id": "video-depth",
+  "title": "视频实时深度估计",
+  "category": "video",
+  "description": "多路视频实时流与逐路深度热力图左右对照（Depth Anything V3）。",
+  "version": "0.1.0",
+  "preview_video": "",
+  "preview_image": "",
+  "software_capabilities": [
+    "swcap_vision_depth"
+  ],
+  "hardware_capabilities": [
+    "hwcap_video_input"
+  ],
+  "backend": {
+    "module": "wdnapps_video_analyzer.cards.video_depth",
+    "register_api": "register_api",
+    "register_shutdown": "register_shutdown"
+  },
+  "frontend": {
+    "template": "/static/apps/video-depth/template.html",
+    "js": [
+      "/static/apps/video-depth/app.js"
+    ],
+    "css": [
+      "/static/apps/video-depth/app.css"
+    ]
+  },
+  "demo_guard": {
+    "active_state_keys": [
+      "session.state",
+      "detector.enabled"
+    ],
+    "stop_endpoints": [
+      {
+        "method": "POST",
+        "path": "/api/video-depth/close"
+      },
+      {
+        "method": "POST",
+        "path": "/api/video-depth/prompt/stop"
+      }
+    ],
+    "stop_sync_endpoints": [
+      {
+        "method": "POST",
+        "path": "/api/video-depth/close"
+      },
+      {
+        "method": "POST",
+        "path": "/api/video-depth/prompt/stop"
+      }
+    ]
+  },
+  "prompts": {
+    "schema_class": "",
+    "editable_fields": [],
+    "prompt_template": ""
+  },
+  "requires_core": [
+    "compute.registry",
+    "depth.depth_detector",
+    "video.multi_session"
+  ],
+  "uploads_dir": "uploads/video_depth",
+  "display_order": 40,
+  "wizard_config": "wizard.json"
+}
