@@ -4,7 +4,7 @@
   "category": "video",
   "description": "对实时视频流进行深度信息估计",
   "version": "0.1.0",
-  "preview_video": "",
+  "preview_video": "/static/apps/video-depth/preview.mp4",
   "preview_image": "",
   "software_capabilities": [
     "swcap_vision_depth"
