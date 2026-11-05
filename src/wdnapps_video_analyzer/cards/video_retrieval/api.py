@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 from app.core.config import default_resource_root
 from app.core.video.frame_judge import (
     DEFAULT_LONG_SIDE,
+    EXPOSED_METRICS,
     MODE_MANUAL,
     cost_ms,
     default_threshold,
@@ -34,6 +35,7 @@ from app.core.video.frame_judge import (
 from app.core.video.session import get_session
 from app.core.video.search import (
     DEFAULT_JUDGE_EVERY_N,
+    DEFAULT_JUDGE_THRESHOLD,
     FIXED_SIM_THRESHOLD,
     FIXED_TOP_K,
     get_service,
@@ -545,13 +547,21 @@ async def get_judge_metrics() -> dict:
     字段与 ``/api/video/judge/metrics`` 逐字一致 —— 共享前端组件
     ``frame-judge.js`` 读的就是这套结构。额外给 ``default_every_n``
     （VR 的兜底间隔是秒级采样口径，与三卡的「解码帧」不同）。
+
+    ``default_threshold`` 的 gscore **必须用 VR 自己的默认值**：三卡的
+    10 是 25fps 逐帧口径，VR 是 1 秒/帧，1 秒间隔上 p50 就已接近 10。
+    前端 ``_defaultThreshold()`` 直接读这里，所以不改共享组件也能拿到 25。
     """
     ms = metrics()
     return {
         "mode": MODE_MANUAL,
         "metrics": ms,
         "cost_ms": {m: round(cost_ms(m) or 0.0, 2) for m in ms},
-        "default_threshold": {m: default_threshold(m) for m in ms},
+        "default_threshold": {
+            m: (DEFAULT_JUDGE_THRESHOLD if m == EXPOSED_METRICS[0]
+                else default_threshold(m))
+            for m in ms
+        },
         "long_side": DEFAULT_LONG_SIDE,
         "default_every_n": DEFAULT_JUDGE_EVERY_N,
     }
@@ -591,7 +601,10 @@ async def set_judge(payload: JudgePayload) -> dict:
     if isinstance(data.get("mode"), str) and not data["mode"].strip():
         data.pop("mode", None)
     result = get_service().set_judge(data)
-    _sync_preview_judge(data)
+    # 用**生效结果**同步预览，而不是原始 data：service 在“切到 gscore 且
+    # 未传 threshold”时会补上 VR 默认 25，原始 data 里没有这个字段。
+    # 传 data 会让功能页显示 25、向导预览曲线仍按全局 10 画。
+    _sync_preview_judge(result)
     return result
 
 
