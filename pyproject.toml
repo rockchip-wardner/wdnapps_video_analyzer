@@ -39,6 +39,11 @@ dev = ["pytest>=7", "build>=1.0"]
 #   右边 = 可 import 的卡片模块；宿主据此定位卡片目录
 #           （模块所在目录 + /manifest.json + /static/）
 # ---------------------------------------------------------------------------
+[project.urls]
+Homepage = "https://github.com/rockchip-wardner/wdnapps_video_analyzer"
+Repository = "https://github.com/rockchip-wardner/wdnapps_video_analyzer"
+Issues = "https://github.com/rockchip-wardner/wdnapps_video_analyzer/issues"
+
 [project.entry-points."wdnwebui.cards"]
 "video-detection" = "wdnapps_video_analyzer.cards.video_detection"
 "video-target-detection" = "wdnapps_video_analyzer.cards.video_target_detection"
