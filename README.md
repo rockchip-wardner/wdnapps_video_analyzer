@@ -1,78 +1,98 @@
+[English](README.md) | [简体中文](README_CN.md)
+
 # wdnapps_video_analyzer
 
-wdnwebui 的**视频分析类应用插件包**。装上之后，宿主页面上会出现这 5 张卡：
+Video-analysis application plugin package for wdnwebui. Once installed, these 5 cards
+appear on the host UI:
 
-| 卡 id | 标题 | 说明 |
+| Card id | Title | Description |
 |---|---|---|
-| `video_detection` | 音视频描述 | 多路画面逐帧 VLM 描述；带帧判据、音轨分析面板、可选 `tts_alert` 语音提醒 |
-| `video_target_detection` | 视频目标监控 | 1~32 路宫格 + VLM 逐路轮转，输出结构化目标事件 |
-| `video_target_localization` | 视频任意目标定位 | 自然语言指定目标 → 输出 grounding bbox（事件到达时命中定格 2s） |
-| `video_retrieval` | 监控反查 | 按自然语言在监控录像里反查目标片段 |
-| `audio_analysis` | 音视频分析 | `hidden`，不显示在应用网格；被音视频描述的「音轨分析」面板调用（`/api/audio-analysis/*`） |
+| `video_detection` | Audio/Video Description | Frame-by-frame VLM description across multiple streams; frame criteria, an audio-track analysis panel, and an optional `tts_alert` voice alert |
+| `video_target_detection` | Video Target Monitoring | 1~32-stream grid + VLM round-robin per stream, emitting structured target events |
+| `video_target_localization` | Video Arbitrary Target Localization | Specify a target in natural language → output grounding bbox (freeze-frame on hit for 2s when the event arrives) |
+| `video_retrieval` | Surveillance Retro-Lookup | Search surveillance recordings for target clips with natural language |
+| `audio_analysis` | Audio/Video Analysis | `hidden`, not shown in the app grid; called by the "Audio Track Analysis" panel of Audio/Video Description (`/api/audio-analysis/*`) |
 
-## 它是什么形态
+## What Form It Takes
 
-**这是 wdnwebui 的插件，不是独立应用。** 卡片后端 `from app.core.*` import 宿主
-的服务——`ComputeRegistry`（LLMSession 唯一来源）、`MultiChannelSession`、
-`WdnaiDetector` 基类等。这些是 wdnwebui 设计原则 4/5 规定的调用路径，插件绕不过
-去也不该绕。所以本 wheel 必须和 wdnwebui 在**同一个解释器**里，且 wdnwebui 仓库根
-在 `sys.path` 上。
+**This is a wdnwebui plugin, not a standalone application.** The card backend imports
+host services with `from app.core.*` — `ComputeRegistry` (the only source of
+`LLMSession`), `MultiChannelSession`, the `WdnaiDetector` base class, and so on.
+These are the call paths mandated by wdnwebui design principles 4/5; a plugin cannot
+route around them and should not try. Therefore this wheel must live in the **same
+interpreter** as wdnwebui, with the wdnwebui repo root on `sys.path`.
 
-## 安装
+## Installation
 
-宿主仓库根有一条 `update_rkwhl.sh`，它同时驱动四个 SDK 和两个卡片插件包。
-**首选跑它**，别手动 pip：
+The host repo root carries an `update_rkwhl.sh` that drives the four SDKs and the two
+card plugin packages together. **Prefer running it** over manual pip:
 
 ```bash
 cd <wdnwebui>
-./update_rkwhl.sh                       # 按 git HEAD 决定哪些要重装
-UPDATE_RKWHL_FORCE_REBUILD=1 ./update_rkwhl.sh   # 强制全部重装
+./update_rkwhl.sh                       # reinstall only what the git HEAD says changed
+UPDATE_RKWHL_FORCE_REBUILD=1 ./update_rkwhl.sh   # force a full reinstall
 ```
 
-脚本对本包做的事：HEAD 没变就完全不碰 `.venv`（连 pip 都不跑）；HEAD 变了
-才 `purge_install_traces` + `pip install -e`。装完会跑一遍卡片注册校验
-（`scripts/check_plugin_entrypoints.py`），逐张卡确认「entry point 能解析 →
-manifest `"id"` 与 entry point 名逐字相同 → 卡片目录有 `static/`」。这挡的
-是那个静默失败：pip 全程报成功，宿主启动却把这几张卡 FATAL 跳过。
+What the script does for this package: if HEAD is unchanged it does not touch `.venv`
+at all (pip is not even run); only when HEAD changes does it run `purge_install_traces`
++ `pip install -e`. After installing it runs a card registration check
+(`scripts/check_plugin_entrypoints.py`) that verifies, card by card: "the entry point
+resolves → the manifest `"id"` is character-for-character identical to the entry point
+name → the card directory has `static/`". This blocks the silent failure where pip
+reports success all the way through, yet the host startup FATAL-skips these cards.
 
-手工装也可以（首次 clone 时脚本走的就是这条路）：
+Manual installation also works (this is the path the script takes on first clone):
 
 ```bash
-# 落在 wdnwebui 的 venv 里，与 wdnai/wdnav/wdndds 平级
+# lands in wdnwebui's venv, next to wdnai/wdnav/wdndds
 cd <wdnwebui>/.venv/src
 git clone git@github.com:rockchip-wardner/wdnapps_video_analyzer.git
 pip install -e wdnapps_video_analyzer
 ```
 
-宿主重启时扫描 `wdnwebui.cards` entry point 组，逐张卡片读 `manifest.json` 并
-挂载路由 + `/static/apps/<id>` 静态目录。装完不必改宿主任何一行代码或配置。
+On host restart it scans the `wdnwebui.cards` entry point group, reads each card's
+`manifest.json`, and mounts its routes plus the `/static/apps/<id>` static directory.
+No host code or configuration needs to change after installation.
 
-> `pip install` 不会因为缺依赖而静默跳过——宿主侧的
-> `_discover_from_entry_points()` 对每张卡单独 try/except，某张卡 import 失败
-> 只 `LOG.error` 并跳过该卡，其余卡照常加载，web UI 不会因此起不来。
-> 排错直接看宿主日志里的 `[<card_id>] plugin entry point ... not importable`。
+> `pip install` does not silently skip a card for missing dependencies — the host's
+> `_discover_from_entry_points()` wraps each card in its own try/except: if one card
+> fails to import it only logs `LOG.error` and skips that card, the rest load normally
+> and the web UI still starts. For troubleshooting, look straight for
+> `[<card_id>] plugin entry point ... not importable` in the host log.
 
-## 加一张新卡
+## Adding a New Card
 
-1. 建 `src/wdnapps_video_analyzer/cards/<新卡>/`，目录结构照抄任意一张现有卡：
-   `__init__.py`（`register_api` / `register_shutdown`）、`api.py`、`service.py`、
-   `manifest.json`、`static/{template.html,app.js,app.css,wizard.json}`。
-2. 卡内 import 一律写全 `wdnapps_video_analyzer.cards.<新卡>.xxx`，**不要**写
-   `app.apps.*`。
-3. 在 `pyproject.toml` 注册 **两处**，缺一不可：
-   - `[project.entry-points."wdnwebui.cards"]` 加 `<卡id> = "…cards.<新卡>"`
-     ——左边必须与 `manifest.json` 的 `"id"` **逐字**相同，否则宿主判 FATAL 跳过。
-     **这里用连字符不用下划线**：包目录是 `cards/video_detection/`（下划线），
-     卡 id 是 `"video-detection"`（连字符），照着模块名写会全部注册失败
-     （表现为日志里一串 `[video_detection] FATAL: manifest id 'video-detection'
-     != entry-point name 'video_detection'`，且插件静默不出现）。
-   - `[tool.setuptools.package-data]` 加该卡的 `["manifest.json", "static/*"]`
-     ——不加的话静态资源不进 wheel，卡片能被发现但前端 404。
+1. Create `src/wdnapps_video_analyzer/cards/<new-card>/`, copying the layout of any
+   existing card: `__init__.py` (`register_api` / `register_shutdown`), `api.py`,
+   `service.py`, `manifest.json`,
+   `static/{template.html,app.js,app.css,wizard.json}`.
+2. Always write in-card imports in full as
+   `wdnapps_video_analyzer.cards.<new-card>.xxx`; **do not** write `app.apps.*`.
+3. Register in **two** places in `pyproject.toml`, both required:
+   - Add `<card-id> = "…cards.<new-card>"` under
+     `[project.entry-points."wdnwebui.cards"]` — the left side must be
+     character-for-character identical to the `"id"` in `manifest.json`, otherwise the
+     host marks it FATAL and skips it. **Use hyphens here, not underscores**: the
+     package directory is `cards/video_detection/` (underscore) while the card id is
+     `"video-detection"` (hyphen); writing the module name verbatim makes every
+     registration fail (symptom: a stream of `[video_detection] FATAL: manifest id
+     'video-detection' != entry-point name 'video_detection'` in the log, and the
+     plugin silently never appears).
+   - Add the card's `["manifest.json", "static/*"]` under
+     `[tool.setuptools.package-data]` — without it the static assets do not enter the
+     wheel, so the card is discoverable but the front end 404s.
 
-## 与宿主的边界
+## Boundary with the Host
 
-插件**只能** `from app.core.*`，不能 import 宿主的 `app.apps.*`（那是别的卡，
-可能压根没装）。反向也不允许：core 不得依赖插件——这也是本包搬走时
-`app/apps/video_detection/tts_alert.py` 被移进宿主 `app/core/tools/tts_alert.py`
-的原因：`app/core/tools/_builtins.py` 要 import 它，而 `_builtins` 也被 detach 的
-`compute_worker` 子进程 import，它一旦指向可选插件，插件没装时工具会静默消失。
+A plugin may **only** `from app.core.*`; it must not import the host's `app.apps.*`
+(those are other cards and may not even be installed). The reverse is forbidden too:
+core must not depend on plugins — which is why, when this package was moved out,
+`app/apps/video_detection/tts_alert.py` was relocated into the host's
+`app/core/tools/tts_alert.py`: `app/core/tools/_builtins.py` imports it, and
+`_builtins` is in turn imported by the detached `compute_worker` subprocess; once it
+points at an optional plugin, the tool silently disappears when the plugin is not
+installed.
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).
