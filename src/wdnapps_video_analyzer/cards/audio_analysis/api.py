@@ -22,6 +22,10 @@ from wdnapps_video_analyzer.cards.audio_analysis.service import get_service
 LOG = logging.getLogger("wdnwebui.api.audio_analysis")
 router = APIRouter(tags=["audio-analysis"])
 
+# WebSocket 发送超时（秒）。对端半开（CLOSE-WAIT 且写缓冲排不空）时
+# send 会永远挂着 ⇒ 必须有上限。详见 image_editor 卡的同款说明。
+_WS_SEND_TIMEOUT = 5.0
+
 
 class StartPayload(BaseModel):
     source: str | None = Field(
@@ -113,18 +117,68 @@ async def audio_analysis_ws(websocket: WebSocket) -> None:
             pass
 
     svc.register_broadcaster(_push)
-    try:
-        # 连接即推快照，让前端不必再额外 GET 一次
-        await websocket.send_text(json.dumps(
-            {"type": "hello", **svc.snapshot()},
-            ensure_ascii=False,
-        ))
+
+    async def _push_loop() -> None:
+        """把队列里的消息推给前端。
+
+        ⚠️ **send 必须加超时**（同仓 image_editor 2026-11-04 实测踩到）：
+        对端「消失但不干净关闭」时（浏览器标签被杀 / 网断 / 进程被 kill），
+        socket 会停在 CLOSE-WAIT 且**还有数据没发出去** ⇒ uvicorn 的
+        ``await send`` 一直等写缓冲排空 ⇒ 这个协程**永远不返回** ⇒
+        webui 关停时 ``server_state.tasks`` 一直非空 ⇒ 关停卡死。
+        ⇒ 超时即视为「连接已死」⇒ 主动收尾。
+        """
         while True:
             msg: Any = await queue.get()
-            await websocket.send_text(json.dumps(msg, ensure_ascii=False))
+            try:
+                await asyncio.wait_for(
+                    websocket.send_text(json.dumps(msg, ensure_ascii=False)),
+                    timeout=_WS_SEND_TIMEOUT,
+                )
+            except (asyncio.TimeoutError, WebSocketDisconnect):
+                return
+            except Exception:                                 # noqa: BLE001
+                return
+
+    async def _watch_disconnect() -> None:
+        """只读协程：客户端断开时抛 ``WebSocketDisconnect``。
+
+        ⚠️ **必须同时「读」一次**（同仓 image_editor 2026-11-04 实测）：
+        只写不读的协程**看不到 disconnect** —— 它不写就不报错 ⇒ 这个
+        ASGI 任务永远不结束 ⇒ 每断一次线就漏一个 handler ⇒ 关停时
+        ``server_state.tasks`` 越积越多 ⇒ 关停越来越慢，最后被 systemd
+        强杀（连坐干掉 compute_worker）。
+        """
+        try:
+            while True:
+                await websocket.receive_text()
+        except WebSocketDisconnect:
+            return
+        except Exception:                                     # noqa: BLE001
+            return
+
+    push = asyncio.create_task(_push_loop())
+    watch = asyncio.create_task(_watch_disconnect())
+    try:
+        # 连接即推快照，让前端不必再额外 GET 一次
+        await asyncio.wait_for(
+            websocket.send_text(json.dumps(
+                {"type": "hello", **svc.snapshot()},
+                ensure_ascii=False,
+            )),
+            timeout=_WS_SEND_TIMEOUT,
+        )
+        # 推送协程与「只读」watcher 赛跑：谁先结束都收尾
+        await asyncio.wait({push, watch},
+                           return_when=asyncio.FIRST_COMPLETED)
     except WebSocketDisconnect:
-        pass
+        return
     except Exception:                                         # noqa: BLE001
-        LOG.exception("audio_analysis_ws loop error")
+        LOG.debug("audio_analysis ws loop error", exc_info=True)
+        return
     finally:
         svc.unregister_broadcaster(_push)
+        LOG.info("audio_analysis ws closed")
+        for t in (push, watch):
+            t.cancel()
+        await asyncio.gather(push, watch, return_exceptions=True)
