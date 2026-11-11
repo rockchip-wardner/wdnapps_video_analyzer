@@ -29,6 +29,6 @@ URL、后端路由、wizard 字段 id 一个都没改**，只有 manifest.json �
 """
 from __future__ import annotations
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 __all__ = ["__version__"]

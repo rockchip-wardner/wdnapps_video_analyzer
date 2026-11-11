@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wdnapps-video-analyzer"
-version = "0.1.0"
+version = "0.1.1"
 description = "wdnwebui 视频分析类应用插件：音视频描述 / 视频目标监控 / 视频任意目标定位 / 监控反查 / 音视频分析"
 readme = "README.md"
 requires-python = ">=3.9"

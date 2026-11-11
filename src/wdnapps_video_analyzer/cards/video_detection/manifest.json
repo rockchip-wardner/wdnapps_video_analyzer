@@ -3,7 +3,7 @@
   "title": "音视频描述",
   "category": "video",
   "description": "对实时视频流逐帧理解，输出画面与声音的文字描述。",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "preview_video": "/static/apps/video-detection/preview.mp4",
   "preview_image": "",
   "software_capabilities": [

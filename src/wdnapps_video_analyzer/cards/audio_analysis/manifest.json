@@ -3,7 +3,7 @@
   "title": "音视频分析",
   "category": "audio",
   "description": "视频音轨分段理解 (Qwen2.5-Omni-3B)",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "hidden": true,
   "preview_video": "",
   "preview_image": "",

@@ -3,7 +3,7 @@
   "title": "监控反查",
   "category": "video",
   "description": "上传视频建立检索索引，用自然语言反查命中片段。",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "preview_video": "/static/apps/video-retrieval/preview.mp4",
   "preview_image": "",
   "software_capabilities": [
