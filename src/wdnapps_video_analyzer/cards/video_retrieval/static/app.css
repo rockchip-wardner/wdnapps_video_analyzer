@@ -34,6 +34,12 @@
 /* HTML `hidden` 的 UA 默认 display:none 会被上面的 display:flex 覆盖，
    清除图片后预览区仍以空框占位（用户实测「缩略图位置显示异常」）。 */
 .vr-image-preview[hidden] { display: none; }
+/* 同一个坑，检索进度条也踩了：`.vr-progress` 有 display:flex（定义在宿主
+   framework.css 里），而 app.js 用**属性**切换显隐（`prog.hidden = true`，
+   四处）—— 作者样式压过 UA 的 [hidden]{display:none} → 切换失效，进度条
+   从进页面起就一直挂着（"检索: 待提取 0%" + 空轨道）。
+   与 .vr-image-preview 同款处理：补一条同族规则把 hidden 放回去。 */
+.vr-progress[hidden] { display: none; }
 .vr-image-preview img {
   max-height: 56px;
   max-width: 112px;
